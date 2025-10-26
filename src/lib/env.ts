@@ -41,7 +41,7 @@ export function getSmartWalletAllowlist(): Array<{ address: string; label: strin
     .map((pair) => {
       const [addr, label] = pair.split(":");
       return {
-        address: (addr || "").toLowerCase(),
+        address: (addr || "").trim().toLowerCase(),
         label: label || "Smart • Allowlist",
       };
     })

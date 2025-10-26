@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { getRecentTrades } from "@/lib/poly";
-import { getSmartWallets } from "@/lib/nansen";
+import { getSmartWallets, hasNansenKey } from "@/lib/nansen";
 import { THRESHOLDS, aggregateStats, passesThresholds } from "@/lib/stats";
 import { boolEnv, getSmartWalletAllowlist } from "@/lib/env";
+import { norm } from "@/lib/util/addr";
 
 export const revalidate = 0;
 
@@ -16,27 +17,29 @@ export async function GET(req: Request) {
   const hours = toNumber(searchParams.get("hours"), 24);
   const minBet = toNumber(searchParams.get("minBet"), THRESHOLDS.minBetSizeUSD);
   const since = Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600;
-  const limited = boolEnv("USE_LIMITED_MODE", false);
+  const limitedMode = boolEnv("USE_LIMITED_MODE", false);
 
   const recentTrades = await getRecentTrades(400);
+  const tradesFetched = recentTrades.length;
 
   let smartWallets = await getSmartWallets();
-
   const allowlist = getSmartWalletAllowlist();
   if (allowlist.length) {
-    const existing = new Set(smartWallets.map((wallet) => wallet.address));
+    const seen = new Set(smartWallets.map((wallet) => wallet.address));
     for (const entry of allowlist) {
-      if (!existing.has(entry.address)) {
+      if (!seen.has(entry.address)) {
         smartWallets.push(entry);
+        seen.add(entry.address);
       }
     }
   }
 
-  if (smartWallets.length === 0) {
+  const usedFallback = smartWallets.length === 0;
+  if (usedFallback) {
     const derived = new Map<string, string>();
     for (const trade of recentTrades) {
-      if (!derived.has(trade.wallet)) {
-        derived.set(trade.wallet, "Derived • Recent Trader");
+      if (!derived.has(trade.walletLower)) {
+        derived.set(trade.walletLower, "Derived • Recent Trader");
       }
       if (derived.size >= 200) {
         break;
@@ -45,38 +48,49 @@ export async function GET(req: Request) {
     smartWallets = Array.from(derived.entries()).map(([address, label]) => ({ address, label }));
   }
 
-  const smartSet = new Set(smartWallets.map((wallet) => wallet.address));
   const labelMap = new Map(smartWallets.map((wallet) => [wallet.address, wallet.label] as const));
+  const smartSet = new Set(smartWallets.map((wallet) => wallet.address));
+  const requireSmart = !(usedFallback && limitedMode);
 
-  const filteredTrades = recentTrades.filter(
-    (trade) => trade.timestamp >= since && trade.sizeUSD > minBet && smartSet.has(trade.wallet)
-  );
+  const filteredTrades = recentTrades.filter((trade) => {
+    const inTime = trade.timestamp >= since;
+    const betOk = trade.sizeUSD > minBet;
+    const walletLower = trade.walletLower || norm(trade.wallet);
+    const smartOk = requireSmart ? smartSet.has(walletLower) : true;
+    return inTime && betOk && smartOk;
+  });
 
   const grouped = new Map<string, typeof filteredTrades>();
   for (const trade of filteredTrades) {
-    if (!grouped.has(trade.wallet)) {
-      grouped.set(trade.wallet, []);
+    const key = trade.walletLower || norm(trade.wallet);
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
     }
-    grouped.get(trade.wallet)!.push(trade);
+    grouped.get(key)!.push(trade);
   }
 
   const items = Array.from(grouped.entries())
-    .map(([wallet, trades]) => {
+    .map(([walletLower, trades]) => {
       const stats = aggregateStats(trades);
-      const latest = trades.reduce((acc, trade) => (trade.timestamp > acc.timestamp ? trade : acc), trades[0]);
+      const mostRecent = trades.reduce(
+        (acc, trade) => (trade.timestamp > acc.timestamp ? trade : acc),
+        trades[0]
+      );
       const largestSize = trades.reduce((max, trade) => Math.max(max, trade.sizeUSD), 0);
 
       return {
-        wallet,
-        label: labelMap.get(wallet) ?? "Smart • Unknown",
-        outcome: latest?.outcome ?? "YES",
+        wallet: walletLower,
+        label:
+          labelMap.get(walletLower) ??
+          (usedFallback ? "Derived • Recent Trader" : "Smart • Unknown"),
+        outcome: mostRecent.outcome,
         sizeUSD: largestSize,
-        price: latest?.price ?? 0,
-        marketId: latest?.marketId ?? "",
-        marketQuestion: latest?.marketQuestion ?? "",
-        marketUrl: latest?.marketUrl ?? "https://polymarket.com",
+        price: mostRecent.price,
+        marketId: mostRecent.marketId,
+        marketQuestion: mostRecent.marketQuestion,
+        marketUrl: mostRecent.marketUrl,
         traderStats: stats,
-        timestamp: latest?.timestamp ?? Math.floor(Date.now() / 1000),
+        timestamp: mostRecent.timestamp,
       };
     })
     .filter((item) => passesThresholds(item.traderStats))
@@ -85,13 +99,20 @@ export async function GET(req: Request) {
 
   return NextResponse.json(
     {
-      items,
+      items: items.map((item) => ({
+        ...item,
+        traderStats: {
+          ...item.traderStats,
+        },
+      })),
       meta: {
         hours,
         minBet,
-        limitedMode: limited,
+        limitedMode,
+        usedFallback,
+        hasNansenKey: hasNansenKey(),
         counts: {
-          tradesFetched: recentTrades.length,
+          tradesFetched,
           walletsEnriched: smartWallets.length,
           afterWindowSmartMinBet: filteredTrades.length,
           afterThresholds: items.length,
@@ -100,7 +121,7 @@ export async function GET(req: Request) {
     },
     {
       headers: {
-        "Cache-Control": "s-maxage=900, stale-while-revalidate=60",
+        "Cache-Control": "s-maxage=600, stale-while-revalidate=60",
       },
     }
   );

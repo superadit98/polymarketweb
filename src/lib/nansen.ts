@@ -1,3 +1,5 @@
+import { norm } from "./util/addr";
+
 export type SmartWallet = { address: string; label: string };
 
 const DEFAULT_NANSEN_KEY = "V6c71knCptYFsYpDMzV6KAszKjIedHCg";
@@ -37,7 +39,7 @@ async function fetchWalletCategory(
 
     const normalized: SmartWallet[] = [];
     for (const item of entries) {
-      const address = String(item?.address ?? item?.wallet ?? "").toLowerCase();
+      const address = norm(item?.address ?? item?.wallet ?? "");
       if (!address) {
         continue;
       }
@@ -79,5 +81,5 @@ export async function getSmartWallets(): Promise<SmartWallet[]> {
 }
 
 export function hasNansenKey(): boolean {
-  return Boolean(process.env.NANSEN_API_KEY?.trim() || DEFAULT_NANSEN_KEY);
+  return Boolean(process.env.NANSEN_API_KEY?.trim());
 }

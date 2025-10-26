@@ -1,7 +1,10 @@
+import { norm } from "./util/addr";
+
 export type Outcome = "YES" | "NO";
 
 export type Trade = {
   wallet: string;
+  walletLower: string;
   marketId: string;
   marketQuestion: string;
   marketSlug?: string;
@@ -53,8 +56,11 @@ function normalizeOutcome(value: unknown): Outcome {
 }
 
 function normalizeTrade(raw: any): Trade | null {
-  const wallet = String(raw?.proxyWallet ?? raw?.trader ?? raw?.wallet ?? "").toLowerCase();
-  if (!wallet) return null;
+  const walletRaw = String(raw?.proxyWallet ?? raw?.trader ?? raw?.wallet ?? "");
+  const walletLower = norm(walletRaw);
+  if (!walletLower) {
+    return null;
+  }
 
   const price = safeNum(raw?.price ?? raw?.avgPrice ?? raw?.tradePrice);
   const size = safeNum(raw?.sizeUSD ?? raw?.amountUsd ?? raw?.amount_usd ?? raw?.size);
@@ -65,7 +71,8 @@ function normalizeTrade(raw: any): Trade | null {
   const marketId = raw?.market?.id ?? raw?.marketId ?? raw?.conditionId ?? raw?.id ?? "unknown";
 
   const trade: Trade = {
-    wallet,
+    wallet: walletLower,
+    walletLower,
     marketId: String(marketId),
     marketQuestion: String(question),
     marketSlug: slug ? String(slug) : undefined,
