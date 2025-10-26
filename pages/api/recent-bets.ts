@@ -1,15 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import {
-  buildRecentBet,
-  deriveApproximateStats,
-  fetchMarketsBySlugs,
-  fetchRecentTrades,
-  fetchTraderStats,
-  hasClobAccess,
-  tradeValueUSD,
-  type Trade,
-} from "@/lib/poly";
-import type { RecentBetsResponse, TraderStats } from "@/types";
+import type { RecentBet, RecentBetsResponse, TraderStats } from "@/types";
+
+const POLY_API_KEY = "0x0927f37e82901ffda620a4ef83f43c115604825a4e20e3712a50111367179437";
 
 const THRESHOLDS = {
   minTotalTrades: 1000,
@@ -17,108 +9,194 @@ const THRESHOLDS = {
   minPositionValueUSD: 40_000,
   minRealizedPnlUSD: 50_000,
   minBetUSD: 100,
-  minWinRate: 50,
+  minWinRateRatio: 0.5,
 };
 
-const DEFAULT_HOURS = 24;
-
-function clampNumber(value: unknown, fallback: number, bounds: { min: number; max: number }) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(bounds.max, Math.max(bounds.min, parsed));
+interface ClobTrade {
+  proxyWallet?: string;
+  user?: string;
+  pseudonym?: string;
+  outcome?: "YES" | "NO";
+  side?: string;
+  size?: number | string;
+  price?: number | string;
+  conditionId?: string;
+  marketId?: string;
+  title?: string;
+  slug?: string;
+  market_slug?: string;
+  market?: { id?: string; question?: string; slug?: string };
+  marketQuestion?: string;
+  timestamp?: number;
+  createdTime?: string;
+  created_time?: string;
+  totalTrades?: number;
+  total_trades?: number;
+  largestWin?: number;
+  largest_win?: number;
+  largestWinUSD?: number;
+  positionValue?: number;
+  position_value?: number;
+  positionValueUSD?: number;
+  realizedPnl?: number;
+  realized_pnl?: number;
+  realizedPnlUSD?: number;
+  winRate?: number;
+  win_rate?: number;
 }
 
-type WalletBucket = {
-  wallet: string;
-  label: string;
-  trades: Trade[];
-  stats: TraderStats | null;
-};
+function safeNumber(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
+}
+
+function parseTimestamp(trade: ClobTrade): number {
+  if (Number.isFinite(trade.timestamp)) {
+    return Number(trade.timestamp);
+  }
+  const iso = trade.createdTime || trade.created_time;
+  if (iso) {
+    const date = Date.parse(iso);
+    if (!Number.isNaN(date)) return Math.floor(date / 1000);
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
+function deriveStats(trade: ClobTrade): { stats: TraderStats; winRateRatio: number } {
+  const totalTrades = safeNumber(trade.totalTrades ?? trade.total_trades) || 0;
+  const largestWinUSD =
+    safeNumber(trade.largestWinUSD ?? trade.largestWin ?? trade.largest_win) || 0;
+  const positionValueUSD =
+    safeNumber(trade.positionValueUSD ?? trade.positionValue ?? trade.position_value) || 0;
+  const realizedPnlUSD =
+    safeNumber(trade.realizedPnlUSD ?? trade.realizedPnl ?? trade.realized_pnl) || 0;
+  const rawWinRate = safeNumber(trade.winRate ?? trade.win_rate) || 0;
+
+  const winRateRatio = rawWinRate > 1 ? rawWinRate / 100 : rawWinRate;
+  const stats: TraderStats = {
+    totalTrades,
+    largestWinUSD,
+    positionValueUSD,
+    realizedPnlUSD,
+    winRate: Math.max(0, winRateRatio * 100),
+  };
+
+  return { stats, winRateRatio };
+}
+
+function mapTradeToRecentBet(trade: ClobTrade): RecentBet | null {
+  const size = safeNumber(trade.size);
+  const price = safeNumber(trade.price);
+  if (!Number.isFinite(size) || !Number.isFinite(price)) {
+    return null;
+  }
+  const sizeUSD = size * price;
+  if (!Number.isFinite(sizeUSD)) {
+    return null;
+  }
+
+  const { stats, winRateRatio } = deriveStats(trade);
+  const passesThresholds =
+    stats.totalTrades > THRESHOLDS.minTotalTrades &&
+    stats.largestWinUSD > THRESHOLDS.minLargestWinUSD &&
+    stats.positionValueUSD > THRESHOLDS.minPositionValueUSD &&
+    stats.realizedPnlUSD > THRESHOLDS.minRealizedPnlUSD &&
+    winRateRatio > THRESHOLDS.minWinRateRatio &&
+    sizeUSD > THRESHOLDS.minBetUSD;
+
+  if (!passesThresholds) {
+    return null;
+  }
+
+  const wallet = trade.proxyWallet || trade.user;
+  if (!wallet) {
+    return null;
+  }
+
+  const marketId = trade.conditionId || trade.marketId || trade.market?.id || "";
+  const slug = trade.slug || trade.market_slug || trade.market?.slug;
+  const marketQuestion =
+    trade.title || trade.marketQuestion || trade.market?.question || slug || "Polymarket market";
+
+  const outcome = (trade.outcome || trade.side || "YES").toUpperCase() === "NO" ? "NO" : "YES";
+
+  return {
+    wallet,
+    label: trade.pseudonym || "Smart Trader",
+    outcome,
+    sizeUSD,
+    price,
+    marketId,
+    marketQuestion,
+    marketUrl: slug ? `https://polymarket.com/market/${slug}` : "https://polymarket.com",
+    traderStats: stats,
+    timestamp: parseTimestamp(trade),
+  };
+}
+
+async function fetchClobTrades(limit: number): Promise<ClobTrade[]> {
+  const endpoint = `https://clob.polymarket.com/trades?limit=${Math.max(1, Math.min(limit, 100))}`;
+  const start = Date.now();
+  try {
+    const res = await fetch(endpoint, {
+      headers: {
+        "X-API-KEY": POLY_API_KEY,
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Polymarket CLOB error ${res.status}: ${body}`);
+    }
+
+    const json = await res.json();
+    if (!Array.isArray(json)) {
+      throw new Error("Unexpected CLOB response format");
+    }
+    return json as ClobTrade[];
+  } catch (error) {
+    const duration = Date.now() - start;
+    console.error("[recent-bets] clob fetch failed", { duration, error });
+    throw error;
+  }
+}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const debug = String(req.query.debug ?? "") === "1";
-  const minBet = clampNumber(req.query.minBet, THRESHOLDS.minBetUSD, { min: 0, max: 1_000_000 });
-  const limit = clampNumber(req.query.limit, 200, { min: 1, max: 500 });
-  const hours = clampNumber(req.query.hours, DEFAULT_HOURS, { min: 1, max: 24 * 30 });
-  const since = Math.max(0, Math.floor(Date.now() / 1000 - hours * 3600));
+  const hours = Number.isFinite(Number(req.query.hours)) ? Number(req.query.hours) : 24;
+  const minBet = Number.isFinite(Number(req.query.minBet)) ? Number(req.query.minBet) : THRESHOLDS.minBetUSD;
 
   try {
-    const trades = await fetchRecentTrades(limit);
-    const timeFiltered = trades.filter((trade) => trade.timestamp >= since);
-    const minBetFiltered = timeFiltered.filter((trade) => tradeValueUSD(trade) >= minBet);
+    const trades = await fetchClobTrades(100);
+    const items: RecentBet[] = [];
 
-    const slugs = minBetFiltered
-      .map((trade) => trade.slug || trade.market_slug || trade.market?.slug)
-      .filter((slug): slug is string => Boolean(slug));
-    const markets = await fetchMarketsBySlugs(slugs);
-
-    const strictMode = hasClobAccess();
-
-    const buckets = new Map<string, WalletBucket>();
-    for (const trade of minBetFiltered) {
-      const wallet = trade.proxyWallet;
-      if (!wallet) continue;
-      if (!buckets.has(wallet)) {
-        buckets.set(wallet, {
-          wallet,
-          label: String(trade.pseudonym ?? "Smart Trader"),
-          trades: [],
-          stats: null,
-        });
+    for (const trade of trades) {
+      const bet = mapTradeToRecentBet(trade);
+      if (bet && bet.sizeUSD >= minBet) {
+        items.push(bet);
       }
-      buckets.get(wallet)!.trades.push(trade);
+      if (items.length >= 50) break;
     }
 
-    const walletBuckets = Array.from(buckets.values());
-
-    if (strictMode) {
-      await Promise.all(
-        walletBuckets.map(async (bucket) => {
-          bucket.stats = await fetchTraderStats(bucket.wallet);
-        })
-      );
-    } else {
-      for (const bucket of walletBuckets) {
-        bucket.stats = deriveApproximateStats(bucket.trades, markets);
-      }
-    }
-
-    const filteredBuckets = walletBuckets.filter((bucket) => {
-      const stats = bucket.stats;
-      if (!stats) return false;
-      if (!strictMode) {
-        return true;
-      }
-      return (
-        stats.totalTrades > THRESHOLDS.minTotalTrades &&
-        stats.largestWinUSD > THRESHOLDS.minLargestWinUSD &&
-        stats.positionValueUSD > THRESHOLDS.minPositionValueUSD &&
-        stats.realizedPnlUSD > THRESHOLDS.minRealizedPnlUSD &&
-        stats.winRate >= THRESHOLDS.minWinRate
-      );
-    });
-
-    const items = filteredBuckets
-      .flatMap((bucket) =>
-        bucket.trades.map((trade) => buildRecentBet(trade, bucket.stats!, markets, bucket.label))
-      )
-      .filter((bet) => bet.sizeUSD >= minBet)
-      .sort((a, b) => b.sizeUSD - a.sizeUSD)
-      .slice(0, 50);
-
-    const payload: RecentBetsResponse = {
-      items,
-      meta: {
-        mode: strictMode ? "strict" : "approximate",
-        counts: {
-          fetched: trades.length,
-          timeFiltered: timeFiltered.length,
-          minBet: minBetFiltered.length,
-          wallets: filteredBuckets.length,
-          items: items.length,
-        },
+    const uniqueWallets = new Set(items.map((item) => item.wallet)).size;
+    const meta = {
+      mode: debug ? "debug" : "live",
+      counts: {
+        fetched: trades.length,
+        items: items.length,
+        wallets: uniqueWallets,
+        minBet,
+        timeFiltered: hours,
       },
-    } as RecentBetsResponse;
+      reason: debug ? "debug=1" : undefined,
+    };
+
+    const payload: RecentBetsResponse = { items, meta };
 
     if (!debug) {
       res.setHeader("Cache-Control", "public, s-maxage=3600, stale-while-revalidate=60");
