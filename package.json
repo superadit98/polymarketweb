@@ -4,12 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "dev:mock": "cross-env MOCK=1 next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "test": "vitest",
-    "test:watch": "vitest watch"
+    "test:watch": "vitest watch",
+    "probe": "node scripts/probe.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.397.0",
@@ -26,7 +26,6 @@
     "eslint-config-next": "14.2.5",
     "postcss": "8.4.33",
     "prettier": "3.2.5",
-    "cross-env": "7.0.3",
     "tailwindcss": "3.4.3",
     "typescript": "5.4.5",
     "vitest": "1.5.0"

@@ -1,130 +1,103 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
-import { getSmartWallets } from '../../../lib/nansen';
-import { fetchWalletData, getMockWalletHistory } from '../../../lib/poly';
-import type { ResponseMeta, WalletHistoryResponse } from '../../../types';
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+import { hasNansen, hasPolySubgraph } from '@/lib/env';
+import { logger } from '@/lib/log';
+import { fetchSmartWallets } from '@/server/nansen';
+import { fetchTraderStats } from '@/server/poly';
+import type { WalletHistoryResponse } from '@/types';
 
 const CACHE_CONTROL = 'public, s-maxage=3600, stale-while-revalidate=60';
+const MARKET_URL_BASE = 'https://polymarket.com/event';
 
-function sanitiseMessage(message: string | undefined): string {
-  if (!message) return 'Unknown error';
-  return message.replace(/\s+/g, ' ').trim().slice(0, 200);
+function makeEtag(payload: WalletHistoryResponse) {
+  const digest = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  return `"${digest.slice(0, 16)}"`;
 }
 
-function normaliseWalletParam(value: string | string[] | undefined): string {
-  if (Array.isArray(value)) {
-    return value[0] ?? '';
-  }
+function normaliseWalletParam(value: string | string[] | undefined) {
+  if (Array.isArray(value)) return value[0] ?? '';
   return value ?? '';
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<WalletHistoryResponse>,
+  res: NextApiResponse<WalletHistoryResponse | { code: string; message: string; hint?: string }>,
 ) {
+  const requestId = randomUUID();
+  res.setHeader('x-request-id', requestId);
   const rawWallet = normaliseWalletParam(req.query.wallet);
+
   if (!rawWallet) {
-    const body: WalletHistoryResponse = {
-      wallet: '',
-      label: 'Unknown',
-      winRate: 0,
-      rows: [],
-      meta: { error: 'Wallet address is required' },
-    };
-    const payload = JSON.stringify(body);
-    res.setHeader('Cache-Control', CACHE_CONTROL);
-    res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-    res.status(200).json(body);
-    return;
-  }
-
-  const lowerWallet = rawWallet.toLowerCase();
-  const { wallets, mock: walletMock, error: walletError } = await getSmartWallets();
-  const meta: ResponseMeta = {};
-  const errors: string[] = [];
-  if (walletError) {
-    errors.push(walletError);
-    console.error('[history] smart wallet fetch failed', {
-      message: sanitiseMessage(walletError),
+    res.status(400).json({
+      code: 'invalid_request',
+      message: 'Wallet parameter is required',
+      hint: 'Pass the wallet address as /api/history/[wallet] path segment',
     });
-  }
-
-  const match = wallets.find((wallet) => wallet.address.toLowerCase() === lowerWallet);
-  const walletInfo = match ?? { address: rawWallet, label: 'Unknown' };
-
-  if (walletMock) {
-    const history = getMockWalletHistory(walletInfo);
-    const body: WalletHistoryResponse = {
-      ...history,
-      meta: {
-        mock: true,
-        ...(errors.length ? { error: sanitiseMessage(errors.join('; ')) } : {}),
-      },
-    };
-    const payload = JSON.stringify(body);
-    res.setHeader('Cache-Control', CACHE_CONTROL);
-    res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-    res.status(200).json(body);
     return;
   }
 
-  const result = await fetchWalletData(walletInfo, 0);
-
-  if (!result.ok) {
-    if (result.meta?.mock) {
-      const history = getMockWalletHistory(walletInfo);
-      const body: WalletHistoryResponse = {
-        ...history,
-        meta: {
-          mock: true,
-          error: sanitiseMessage(result.error),
-        },
+  try {
+    if (!hasNansen && !hasPolySubgraph) {
+      const payload: WalletHistoryResponse = {
+        wallet: rawWallet,
+        label: 'Unknown',
+        winRate: 0,
+        rows: [],
+        meta: { mock: true, reason: 'Nansen and Polymarket configuration missing' },
       };
-      const payload = JSON.stringify(body);
       res.setHeader('Cache-Control', CACHE_CONTROL);
-      res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-      res.status(200).json(body);
+      res.setHeader('ETag', makeEtag(payload));
+      res.setHeader('X-Mock', '1');
+      res.status(200).json(payload);
       return;
     }
 
-    console.error('[history] wallet fetch failed', {
-      wallet: walletInfo.address,
-      message: sanitiseMessage(result.error),
-    });
+    if (!hasNansen) {
+      throw new Error('Nansen API key is not configured');
+    }
 
-    const body: WalletHistoryResponse = {
-      wallet: walletInfo.address,
-      label: walletInfo.label,
-      winRate: 0,
-      rows: [],
-      meta: {
-        ...(errors.length ? { error: sanitiseMessage(`${errors.join('; ')}; ${result.error}`) } : { error: sanitiseMessage(result.error) }),
-      },
+    if (!hasPolySubgraph) {
+      throw new Error('Polymarket subgraph URL is not configured');
+    }
+
+    const wallets = await fetchSmartWallets();
+    const walletAddress = rawWallet.toLowerCase();
+    const wallet = wallets.find((item) => item.address.toLowerCase() === walletAddress);
+    const label = wallet?.label ?? 'Unknown';
+
+    const stats = await fetchTraderStats(walletAddress);
+
+    const rows = stats.closed.map((trade) => ({
+      marketId: trade.marketId,
+      marketQuestion: trade.marketQuestion,
+      outcome: trade.outcome,
+      sizeUSD: trade.sizeUSD,
+      price: trade.price,
+      result: trade.result,
+      pnlUSD: trade.pnlUSD,
+      marketUrl: trade.marketUrl ?? `${MARKET_URL_BASE}/${trade.marketId}`,
+      closedAt: trade.closedAt ?? undefined,
+    }));
+
+    const payload: WalletHistoryResponse = {
+      wallet: walletAddress,
+      label,
+      winRate: stats.winRate,
+      rows,
     };
-    const payload = JSON.stringify(body);
+
     res.setHeader('Cache-Control', CACHE_CONTROL);
-    res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-    res.status(200).json(body);
-    return;
+    res.setHeader('ETag', makeEtag(payload));
+    res.status(200).json(payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    logger.error('[history] request failed', { requestId, message, wallet: rawWallet });
+    res.status(500).json({
+      code: 'wallet_history_error',
+      message,
+      hint: 'Verify Nansen and Polymarket connectivity via /api/debug',
+    });
   }
-
-  const { stats, historyRows } = result.data;
-
-  if (errors.length) {
-    meta.error = sanitiseMessage(errors.join('; '));
-  }
-
-  const body: WalletHistoryResponse = {
-    wallet: walletInfo.address,
-    label: walletInfo.label,
-    winRate: stats.winRate,
-    rows: historyRows,
-    ...(meta.error ? { meta } : {}),
-  };
-
-  const payload = JSON.stringify(body);
-  res.setHeader('Cache-Control', CACHE_CONTROL);
-  res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-  res.status(200).json(body);
 }

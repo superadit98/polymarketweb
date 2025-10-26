@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { clampRecentBets, computeWinRate, passesTraderFilters, safeNumber } from '../lib/stats';
-import type { HistoryRow, RecentBet, TraderStats } from '../types';
+import { clampRecentBets, computeWinRate, applyThresholds, safeNumber } from '@/server/stats';
+import type { HistoryRow, RecentBet, TraderStats } from '@/types';
 
 const baseStats: TraderStats = {
   totalTrades: 1_500,
@@ -24,24 +24,32 @@ describe('computeWinRate', () => {
   });
 });
 
-describe('passesTraderFilters', () => {
+describe('applyThresholds', () => {
   it('returns true when all profitability thresholds are satisfied', () => {
-    expect(passesTraderFilters(baseStats)).toBe(true);
+    expect(applyThresholds(baseStats, 1_500, 500)).toBe(true);
   });
 
   it('returns false when any threshold is below the configured minimum', () => {
     expect(
-      passesTraderFilters({
-        ...baseStats,
-        totalTrades: 800,
-      }),
+      applyThresholds(
+        {
+          ...baseStats,
+          totalTrades: 800,
+        },
+        1_500,
+        500,
+      ),
     ).toBe(false);
 
     expect(
-      passesTraderFilters({
-        ...baseStats,
-        largestWinUSD: 9_000,
-      }),
+      applyThresholds(
+        {
+          ...baseStats,
+          largestWinUSD: 9_000,
+        },
+        1_500,
+        500,
+      ),
     ).toBe(false);
   });
 });

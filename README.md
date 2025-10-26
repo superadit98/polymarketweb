@@ -14,9 +14,11 @@ Create a `.env.local` file for local development:
 ```
 NANSEN_API_KEY=your-nansen-api-key
 POLY_SUBGRAPH_URL=https://your-goldsky-polymarket-subgraph
+POLY_REST_BASE=https://polymarket.com/api # optional override
+LOG_LEVEL=info
 ```
 
-When these keys are missing the server automatically falls back to rich mock data. You can explicitly opt in to mock mode with `MOCK=1`.
+Both the Nansen and Polymarket subgraph keys must be present for live data. If either is missing the API endpoints return a `200` response with an empty list and the `X-Mock: 1` header so the UI stays functional.
 
 ## Getting started
 
@@ -27,24 +29,16 @@ npm install
 npm run dev
 ```
 
-To preview the experience without API keys, run:
-
-```bash
-npm run dev:mock
-```
-
-This sets `MOCK=1` so the API endpoints return seeded mock responses without touching live services.
-
 ## Available scripts
 
 | Script | Description |
 | --- | --- |
 | `npm run dev` | Start Next.js in development mode. |
-| `npm run dev:mock` | Start the app in mock mode with generated data. |
 | `npm run build` | Build the production bundle. |
 | `npm run start` | Run the production server. |
 | `npm run lint` | Run ESLint. |
 | `npm run test` | Execute Vitest unit tests. |
+| `npm run probe` | Call `/api/debug` (requires the dev server running) and print the diagnostics payload. |
 
 ## Testing
 
@@ -63,13 +57,19 @@ Both endpoints cache responses for 60 minutes via HTTP caching headers and ETags
 app/
   page.tsx      # Single-page dashboard UI
 pages/api/
-  recent-bets.ts          # REST endpoint for high-value bets
-  history/[wallet].ts     # REST endpoint for per-wallet history
-lib/
-  env.ts        # Environment helpers
-  nansen.ts     # Smart wallet fetching & mocks
-  poly.ts       # Polymarket subgraph helpers & mocks
-  stats.ts      # Thresholds & calculations
+  debug.ts               # Connectivity probe for support/debugging
+  recent-bets.ts         # REST endpoint for high-value bets
+  history/[wallet].ts    # REST endpoint for per-wallet history
+src/
+  lib/
+    env.ts               # Environment bootstrap + logging level
+    log.ts               # Lightweight logger
+  server/
+    http.ts              # Fetch helper with retries/timeouts
+    nansen.ts            # Smart wallet ingestion
+    poly.ts              # Polymarket data aggregation & probes
+    stats.ts             # Win-rate + filter helpers
+  types.ts               # Shared server/client DTOs
 ```
 
 ## Linting & formatting
@@ -78,11 +78,11 @@ The project ships with ESLint (Next.js config) and Prettier 3. Run `npm run lint
 
 ## Deployment
 
-Deploying to Vercel only requires the two environment variables above. Configure them in the Vercel dashboard (Project Settings → Environment Variables) and then run:
+Deploying to Vercel requires setting `NANSEN_API_KEY` and `POLY_SUBGRAPH_URL` (plus optional `POLY_REST_BASE`) in the Vercel dashboard (Project Settings → Environment Variables). Once configured, redeploy with:
 
 ```bash
 vercel deploy --prod
 ```
 
-Vercel builds will fall back to mock responses automatically if the variables are missing, so production should always return HTTP 200.
+After deploying you can hit `/api/debug` to confirm connectivity—successful probes will report `subgraphProbe.ok` and `restProbe.ok` as `true`.
 

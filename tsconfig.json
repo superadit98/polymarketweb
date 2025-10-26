@@ -23,8 +23,17 @@
       "vitest/globals"
     ],
     "paths": {
+      "@/*": [
+        "src/*"
+      ],
+      "@/types": [
+        "src/types"
+      ],
       "@/lib/*": [
-        "lib/*"
+        "src/lib/*"
+      ],
+      "@/server/*": [
+        "src/server/*"
       ],
       "@/components/*": [
         "components/*"

@@ -1,118 +1,159 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
-import { getSmartWallets } from '../../lib/nansen';
-import { fetchWalletData, getMockRecentBets } from '../../lib/poly';
-import { clampRecentBets, passesTraderFilters } from '../../lib/stats';
-import type { RecentBet, RecentBetsResponse, ResponseMeta } from '../../types';
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+import { hasNansen, hasPolySubgraph } from '@/lib/env';
+import { logger } from '@/lib/log';
+import { fetchSmartWallets } from '@/server/nansen';
+import {
+  fetchTraderStats,
+  queryRecentFills,
+  restRecentFills,
+} from '@/server/poly';
+import { applyThresholds, clampRecentBets } from '@/server/stats';
+import type { RecentBet, RecentBetsResponse, ResponseMeta } from '@/types';
 
 const CACHE_CONTROL = 'public, s-maxage=3600, stale-while-revalidate=60';
+const SINCE_MINUTES = 120;
+const MAX_ITEMS = 50;
+const MARKET_URL_BASE = 'https://polymarket.com/event';
 
-function parseMinBet(value: string | string[] | undefined): number {
-  const raw = Array.isArray(value) ? value[0] : value;
-  const parsed = Number(raw ?? 500);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return 500;
-  }
+function parseMinBet(raw: unknown): number {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const parsed = Number(value ?? 500);
+  if (!Number.isFinite(parsed) || parsed < 0) return 500;
   return parsed;
 }
 
-function sanitiseMessage(message: string | undefined): string {
-  if (!message) return 'Unknown error';
-  return message.replace(/\s+/g, ' ').trim().slice(0, 200);
+function makeEtag(payload: RecentBetsResponse) {
+  const digest = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  return `"${digest.slice(0, 16)}"`;
 }
 
 export default async function handler(
   req: NextApiRequest,
-  res: NextApiResponse<RecentBetsResponse>,
+  res: NextApiResponse<RecentBetsResponse | { code: string; message: string; hint?: string }>,
 ) {
-  const minBet = parseMinBet(req.query.minBet);
-  const { wallets, mock: walletMock, error: walletError } = await getSmartWallets();
+  const requestId = randomUUID();
+  res.setHeader('x-request-id', requestId);
 
-  const meta: ResponseMeta = {};
-  const errors: string[] = [];
-  if (walletError) {
-    errors.push(walletError);
-    console.error('[recent-bets] smart wallet fetch failed', {
-      message: sanitiseMessage(walletError),
+  try {
+    const minBet = parseMinBet(req.query.minBet);
+
+    if (!hasNansen && !hasPolySubgraph) {
+      const body: RecentBetsResponse = {
+        items: [],
+        meta: {
+          mock: true,
+          reason: 'Nansen and Polymarket configuration missing',
+        },
+      };
+      res.setHeader('Cache-Control', CACHE_CONTROL);
+      res.setHeader('ETag', makeEtag(body));
+      res.setHeader('X-Mock', '1');
+      res.status(200).json(body);
+      return;
+    }
+
+    if (!hasNansen) {
+      throw new Error('Nansen API key is not configured');
+    }
+
+    if (!hasPolySubgraph) {
+      throw new Error('Polymarket subgraph URL is not configured');
+    }
+
+    const wallets = await fetchSmartWallets();
+    if (!wallets.length) {
+      throw new Error('No smart wallets returned by Nansen');
+    }
+
+    const walletMap = new Map(wallets.map((wallet) => [wallet.address.toLowerCase(), wallet.label]));
+
+    const addresses = wallets.map((wallet) => wallet.address.toLowerCase());
+    const meta: ResponseMeta = {};
+
+    let fills: Awaited<ReturnType<typeof queryRecentFills>> = [];
+    try {
+      fills = await queryRecentFills(addresses, SINCE_MINUTES);
+    } catch (error) {
+      logger.warn('[recent-bets] subgraph query failed, using REST fallback', {
+        requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      fills = await restRecentFills(addresses, SINCE_MINUTES);
+      meta.fallback = 'rest';
+    }
+
+    if (!fills.length && !meta.fallback) {
+      try {
+        fills = await restRecentFills(addresses, SINCE_MINUTES);
+        meta.fallback = 'rest';
+      } catch (error) {
+        throw new Error(
+          `Failed to query Polymarket fills: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    if (!fills.length) {
+      const body: RecentBetsResponse = { items: [], meta };
+      res.setHeader('Cache-Control', CACHE_CONTROL);
+      res.setHeader('ETag', makeEtag(body));
+      res.status(200).json(body);
+      return;
+    }
+
+    const uniqueAddresses = Array.from(new Set(fills.map((fill) => fill.wallet.toLowerCase())));
+    const statsByWallet = new Map<string, Awaited<ReturnType<typeof fetchTraderStats>>>();
+
+    for (const address of uniqueAddresses) {
+      const stats = await fetchTraderStats(address);
+      statsByWallet.set(address, stats);
+    }
+
+    const items: RecentBet[] = [];
+    for (const fill of fills) {
+      const address = fill.wallet.toLowerCase();
+      const stats = statsByWallet.get(address);
+      const label = walletMap.get(address) ?? 'Unknown';
+      if (!stats) continue;
+      if (!applyThresholds(stats, fill.sizeUSD, minBet)) continue;
+      items.push({
+        wallet: address,
+        label,
+        outcome: fill.outcome,
+        sizeUSD: fill.sizeUSD,
+        price: fill.price,
+        marketId: fill.marketId,
+        marketQuestion: fill.marketQuestion,
+        marketUrl: fill.marketUrl || `${MARKET_URL_BASE}/${fill.marketId}`,
+        traderStats: {
+          totalTrades: stats.totalTrades,
+          largestWinUSD: stats.largestWinUSD,
+          positionValueUSD: stats.positionValueUSD,
+          realizedPnlUSD: stats.realizedPnlUSD,
+          winRate: stats.winRate,
+        },
+        timestamp: fill.timestamp,
+      });
+    }
+
+    const response: RecentBetsResponse = {
+      items: clampRecentBets(items, MAX_ITEMS),
+      ...(meta.fallback ? { meta } : {}),
+    };
+
+    res.setHeader('Cache-Control', CACHE_CONTROL);
+    res.setHeader('ETag', makeEtag(response));
+    res.status(200).json(response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    logger.error('[recent-bets] request failed', { requestId, message });
+    res.status(500).json({
+      code: 'recent_bets_error',
+      message,
+      hint: 'Check /api/debug for environment diagnostics',
     });
   }
-
-  const useMock = walletMock;
-
-  if (useMock) {
-    meta.mock = true;
-    if (errors.length) {
-      meta.error = sanitiseMessage(errors.join('; '));
-    }
-    const items = getMockRecentBets(minBet);
-    const body: RecentBetsResponse = {
-      items,
-      meta,
-    };
-    const payload = JSON.stringify(body);
-    res.setHeader('Cache-Control', CACHE_CONTROL);
-    res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-    res.status(200).json(body);
-    return;
-  }
-
-  const aggregated: RecentBet[] = [];
-
-  for (const wallet of wallets) {
-    const result = await fetchWalletData(wallet, minBet);
-    if (!result.ok) {
-      errors.push(result.error);
-      console.error('[recent-bets] wallet fetch failed', {
-        wallet: wallet.address,
-        message: sanitiseMessage(result.error),
-      });
-      if (result.meta?.mock) {
-        meta.mock = true;
-        break;
-      }
-      continue;
-    }
-
-    const { stats, recentBets } = result.data;
-    if (!passesTraderFilters(stats)) {
-      continue;
-    }
-
-    if (recentBets.length === 0) {
-      continue;
-    }
-
-    aggregated.push(...recentBets);
-  }
-
-  let items = clampRecentBets(aggregated, 50);
-
-  if (meta.mock) {
-    items = getMockRecentBets(minBet);
-  }
-
-  if (items.length === 0 && aggregated.length === 0 && !meta.mock) {
-    if (!wallets.length) {
-      errors.push('No eligible wallets returned by Nansen');
-    }
-  }
-
-  if (errors.length) {
-    meta.error = sanitiseMessage(errors.join('; '));
-  }
-
-  if (meta.mock) {
-    meta.mock = true;
-  }
-
-  const body: RecentBetsResponse = {
-    items,
-    ...(meta.mock || meta.error ? { meta } : {}),
-  };
-
-  const payload = JSON.stringify(body);
-  res.setHeader('Cache-Control', CACHE_CONTROL);
-  res.setHeader('ETag', `"${createHash('sha1').update(payload).digest('hex')}"`);
-  res.status(200).json(body);
 }

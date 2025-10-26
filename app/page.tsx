@@ -8,7 +8,7 @@ import type {
   ResponseMeta,
   WalletHistory,
   WalletHistoryResponse,
-} from '../types';
+} from '@/types';
 
 const REFRESH_INTERVAL = 60 * 60 * 1000;
 const DEFAULT_MIN_BET = 100;
@@ -37,11 +37,15 @@ export default function HomePage() {
   const [bets, setBets] = useState<RecentBet[]>([]);
   const [betsMeta, setBetsMeta] = useState<ResponseMeta | undefined>();
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; hint?: string; requestId?: string } | null>(
+    null,
+  );
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<WalletHistory | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<
+    { message: string; hint?: string; requestId?: string } | null
+  >(null);
   const [historyMeta, setHistoryMeta] = useState<ResponseMeta | undefined>();
 
   const fetchBets = useCallback(async () => {
@@ -49,15 +53,30 @@ export default function HomePage() {
     setError(null);
     try {
       const response = await fetch(`/api/recent-bets?minBet=${DEFAULT_MIN_BET}`);
+      const requestId = response.headers.get('x-request-id') ?? undefined;
       if (!response.ok) {
-        throw new Error(`Request failed: ${response.status}`);
+        const payload = await response
+          .json()
+          .catch(() => ({ message: `Request failed: ${response.status}` }));
+        throw Object.assign(new Error(payload?.message ?? `Request failed: ${response.status}`), {
+          hint: typeof payload?.hint === 'string' ? payload.hint : undefined,
+          requestId,
+        });
       }
       const json = (await response.json()) as RecentBetsResponse;
       const items = Array.isArray(json?.items) ? json.items : [];
       setBets(items.slice(0, MAX_WALLETS));
       setBetsMeta(json.meta);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load data');
+      if (err instanceof Error) {
+        setError({
+          message: err.message,
+          hint: (err as { hint?: string }).hint,
+          requestId: (err as { requestId?: string }).requestId,
+        });
+      } else {
+        setError({ message: 'Failed to load data' });
+      }
       setBetsMeta(undefined);
     } finally {
       setLoading(false);
@@ -71,8 +90,15 @@ export default function HomePage() {
     setSelected({ wallet, label, winRate: 0, rows: [] });
     try {
       const response = await fetch(`/api/history/${wallet}`);
+      const requestId = response.headers.get('x-request-id') ?? undefined;
       if (!response.ok) {
-        throw new Error(`Request failed: ${response.status}`);
+        const payload = await response
+          .json()
+          .catch(() => ({ message: `Request failed: ${response.status}` }));
+        throw Object.assign(new Error(payload?.message ?? `Request failed: ${response.status}`), {
+          hint: typeof payload?.hint === 'string' ? payload.hint : undefined,
+          requestId,
+        });
       }
       const json = (await response.json()) as WalletHistoryResponse;
       const nextSelected: WalletHistory = {
@@ -84,7 +110,15 @@ export default function HomePage() {
       setSelected(nextSelected);
       setHistoryMeta(json.meta);
     } catch (err) {
-      setHistoryError(err instanceof Error ? err.message : 'Failed to load history');
+      if (err instanceof Error) {
+        setHistoryError({
+          message: err.message,
+          hint: (err as { hint?: string }).hint,
+          requestId: (err as { requestId?: string }).requestId,
+        });
+      } else {
+        setHistoryError({ message: 'Failed to load history' });
+      }
     } finally {
       setHistoryLoading(false);
     }
@@ -143,9 +177,13 @@ export default function HomePage() {
           </button>
         </div>
         {error ? (
-          <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-            {error}
-          </p>
+          <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+            <p className="font-medium">{error.message}</p>
+            {error.hint ? <p className="mt-1 text-xs">Hint: {error.hint}</p> : null}
+            {error.requestId ? (
+              <p className="mt-1 text-xs font-mono">Request ID: {error.requestId}</p>
+            ) : null}
+          </div>
         ) : null}
       </header>
 
@@ -157,7 +195,7 @@ export default function HomePage() {
         ) : filteredBets.length === 0 ? (
           <div className="rounded-xl bg-white p-6 text-center text-sm text-slate-500 shadow-sm">
             {betsMeta?.mock
-              ? 'Using mock data / missing API keys.'
+              ? `Using mock data${betsMeta.reason ? ` (${betsMeta.reason})` : ''}.`
               : 'No bets match your filters right now. Try refreshing later.'}
           </div>
         ) : (
@@ -257,7 +295,7 @@ function HistoryModal({
   meta?: ResponseMeta;
   onClose: () => void;
   isLoading: boolean;
-  error: string | null;
+  error: { message: string; hint?: string; requestId?: string } | null;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-10">
@@ -285,7 +323,13 @@ function HistoryModal({
           {isLoading ? (
             <p className="p-6 text-sm text-slate-500">Loading trade history…</p>
           ) : error ? (
-            <p className="p-6 text-sm text-red-600">{error}</p>
+            <div className="p-6 text-sm text-red-600">
+              <p className="font-medium">{error.message}</p>
+              {error.hint ? <p className="mt-1 text-xs">Hint: {error.hint}</p> : null}
+              {error.requestId ? (
+                <p className="mt-1 text-xs font-mono">Request ID: {error.requestId}</p>
+              ) : null}
+            </div>
           ) : data.rows.length === 0 ? (
             <p className="p-6 text-sm text-slate-500">No trade history available.</p>
           ) : (
