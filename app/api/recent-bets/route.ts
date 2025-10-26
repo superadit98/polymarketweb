@@ -5,7 +5,7 @@ import { THRESHOLDS, passesThresholds } from "@/lib/stats";
 import { boolEnv, getSmartWalletAllowlist } from "@/lib/env";
 import { norm } from "@/lib/util/addr";
 import { TTLCache } from "@/lib/cache";
-import { computeTraderStats, TraderStats } from "@/lib/poly-data";
+import { computeTraderStats, TraderStats, ProbeNote } from "@/lib/poly-data";
 
 export const revalidate = 0;
 
@@ -14,23 +14,30 @@ function toNumber(value: unknown, fallback: number): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
-const statsCache = new TTLCache<TraderStats | { _err?: string }>(60 * 60 * 1000);
+const statsCache = new TTLCache<{ stats: TraderStats; probes: ProbeNote[] }>(60 * 60 * 1000);
 
-async function mapWithConcurrency<T, R>(
+const EMPTY_STATS: TraderStats = {
+  totalTrades: 0,
+  largestWinUSD: 0,
+  positionValueUSD: 0,
+  realizedPnlUSD: 0,
+  winRate: 0,
+};
+
+async function mapWithLimit<T, R>(
   items: T[],
   concurrency: number,
   mapper: (item: T) => Promise<R>
 ): Promise<R[]> {
+  if (items.length === 0) {
+    return [];
+  }
   const results: R[] = new Array(items.length);
   let index = 0;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     while (index < items.length) {
-      const currentIndex = index++;
-      try {
-        results[currentIndex] = await mapper(items[currentIndex]);
-      } catch (error) {
-        throw error;
-      }
+      const current = index++;
+      results[current] = await mapper(items[current]);
     }
   });
   await Promise.all(workers);
@@ -42,6 +49,7 @@ export async function GET(req: Request) {
   const hours = toNumber(searchParams.get("hours"), 24);
   const minBet = toNumber(searchParams.get("minBet"), THRESHOLDS.minBetSizeUSD);
   const debug = searchParams.get("debug") === "1";
+  const relax = searchParams.get("relax") === "1";
   const since = Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600;
   const limitedMode = boolEnv("USE_LIMITED_MODE", false);
 
@@ -78,7 +86,7 @@ export async function GET(req: Request) {
   const smartSet = new Set(smartWallets.map((wallet) => wallet.address));
   const requireSmart = !(usedFallback && limitedMode);
 
-  const filteredTrades = recentTrades.filter((trade) => {
+  const windowedTrades = recentTrades.filter((trade) => {
     const inTime = trade.timestamp >= since;
     const betOk = trade.sizeUSD > minBet;
     const walletLower = trade.walletLower || norm(trade.wallet);
@@ -86,8 +94,8 @@ export async function GET(req: Request) {
     return inTime && betOk && smartOk;
   });
 
-  const grouped = new Map<string, typeof filteredTrades>();
-  for (const trade of filteredTrades) {
+  const grouped = new Map<string, typeof windowedTrades>();
+  for (const trade of windowedTrades) {
     const key = trade.walletLower || norm(trade.wallet);
     if (!grouped.has(key)) {
       grouped.set(key, []);
@@ -96,41 +104,53 @@ export async function GET(req: Request) {
   }
 
   const walletKeys = Array.from(grouped.keys());
-  const enriched = await mapWithConcurrency(walletKeys, 6, async (wallet) => {
+  const dbgPerWallet: Record<
+    string,
+    { probes?: ProbeNote[]; cached?: boolean; error?: string }
+  > = {};
+
+  const enriched = await mapWithLimit(
+    walletKeys,
+    6,
+    async (wallet) => {
         const cached = statsCache.get(wallet);
-        let stats = cached as TraderStats | { _err?: string } | undefined;
-        if (!stats) {
+        let stats: TraderStats;
+        let probes: ProbeNote[] = [];
+        let error: string | undefined;
+        let cachedFlag = false;
+
+        const holder = { probes: [] as ProbeNote[] };
+
+        if (cached) {
+          stats = cached.stats;
+          probes = cached.probes;
+          cachedFlag = true;
+        } else {
           try {
-            stats = await computeTraderStats(wallet);
-            statsCache.set(wallet, stats);
-          } catch (error: any) {
-            stats = { _err: String(error?.message || error) };
+            stats = await computeTraderStats(wallet, holder);
+            probes = holder.probes ?? [];
+            statsCache.set(wallet, { stats, probes });
+          } catch (err: any) {
+            stats = { ...EMPTY_STATS };
+            probes = holder.probes ?? [];
+            error = String(err?.message || err);
           }
         }
 
-        const trades = grouped.get(wallet)!;
-        const mostRecent = trades.reduce(
-          (acc, trade) => (trade.timestamp > acc.timestamp ? trade : acc),
-          trades[0]
-        );
-        const largestSize = trades.reduce((max, trade) => Math.max(max, trade.sizeUSD), 0);
+        if (!cached && !probes.length) {
+          probes = holder.probes ?? [];
+        }
 
-        const resolvedStats: TraderStats =
-          stats && "_err" in (stats as Record<string, unknown>)
-            ? {
-                totalTrades: 0,
-                largestWinUSD: 0,
-                positionValueUSD: 0,
-                realizedPnlUSD: 0,
-                winRate: 0,
-              }
-            : {
-                totalTrades: (stats as TraderStats)?.totalTrades ?? 0,
-                largestWinUSD: (stats as TraderStats)?.largestWinUSD ?? 0,
-                positionValueUSD: (stats as TraderStats)?.positionValueUSD ?? 0,
-                realizedPnlUSD: (stats as TraderStats)?.realizedPnlUSD ?? 0,
-                winRate: (stats as TraderStats)?.winRate ?? 0,
-              };
+        dbgPerWallet[wallet] = { probes, cached: cachedFlag, error };
+
+        const trades = grouped.get(wallet)!;
+        const mostRecent = trades.reduce((acc, trade) =>
+          trade.timestamp > acc.timestamp ? trade : acc
+        );
+        const sizePeak = trades.reduce(
+          (max, trade) => Math.max(max, trade.sizeUSD),
+          0
+        );
 
         return {
           wallet,
@@ -138,20 +158,30 @@ export async function GET(req: Request) {
             labelMap.get(wallet) ??
             (usedFallback ? "Derived • Recent Trader" : "Smart • Unknown"),
           outcome: mostRecent.outcome,
-          sizeUSD: largestSize,
+          sizeUSD: sizePeak,
           price: mostRecent.price,
           marketId: mostRecent.marketId,
           marketQuestion: mostRecent.marketQuestion,
           marketUrl: mostRecent.marketUrl,
-          traderStats: resolvedStats,
+          traderStats: stats,
           timestamp: mostRecent.timestamp,
         };
-  });
+    }
+  );
 
-  const items = enriched
-    .filter((item) => passesThresholds(item.traderStats))
-    .sort((a, b) => b.sizeUSD - a.sizeUSD)
-    .slice(0, 50);
+  const sorted = enriched.slice().sort((a, b) => b.sizeUSD - a.sizeUSD);
+  const filtered = relax
+    ? sorted
+    : sorted.filter((item) => passesThresholds(item.traderStats));
+  const items = filtered.slice(0, 50);
+
+  const walletsWithStats = Object.values(dbgPerWallet).filter((entry) => {
+    if (entry?.cached) {
+      return true;
+    }
+    if (!entry?.probes) return false;
+    return entry.probes.some((probe) => probe.rows > 0);
+  }).length;
 
   const body: Record<string, unknown> = {
     items,
@@ -160,12 +190,13 @@ export async function GET(req: Request) {
       minBet,
       limitedMode,
       usedFallback,
+      relax,
       hasNansenKey: hasNansenKey(),
       counts: {
         tradesFetched,
         walletsEnriched: smartWallets.length,
-        walletsWithStats: enriched.length,
-        afterWindowSmartMinBet: filteredTrades.length,
+        walletsWithStats,
+        afterWindowSmartMinBet: windowedTrades.length,
         afterThresholds: items.length,
       },
     },
@@ -174,6 +205,7 @@ export async function GET(req: Request) {
   if (debug) {
     (body as any).debug = {
       sampled: enriched.slice(0, 3),
+      walletDebug: dbgPerWallet,
     };
   }
 

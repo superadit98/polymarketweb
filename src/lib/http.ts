@@ -16,8 +16,8 @@ export async function jfetch(
     });
 
     if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
     }
 
     return res.json();

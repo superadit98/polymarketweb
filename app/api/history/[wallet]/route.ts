@@ -1,15 +1,21 @@
 import { NextResponse } from "next/server";
 import { getSmartWallets } from "@/lib/nansen";
 import { getSmartWalletAllowlist } from "@/lib/env";
-import { fetchClosedTrades, computeTraderStats } from "@/lib/poly-data";
+import { fetchClosedTrades, computeTraderStats, ProbeNote } from "@/lib/poly-data";
 
 export const revalidate = 0;
 
-export async function GET(_req: Request, context: { params: { wallet: string } }) {
+export async function GET(req: Request, context: { params: { wallet: string } }) {
   const wallet = context.params.wallet.toLowerCase();
-  const [closedTrades, smartWallets] = await Promise.all([
-    fetchClosedTrades(wallet, 1000),
+  const debug = new URL(req.url).searchParams.get("debug") === "1";
+
+  const closedProbes: ProbeNote[] = [];
+  const statsDbg = { probes: [] as ProbeNote[] };
+
+  const [closedTrades, smartWallets, stats] = await Promise.all([
+    fetchClosedTrades(wallet, closedProbes),
     getSmartWallets(),
+    computeTraderStats(wallet, statsDbg),
   ]);
 
   const allowlist = getSmartWalletAllowlist();
@@ -25,8 +31,6 @@ export async function GET(_req: Request, context: { params: { wallet: string } }
   const label =
     combined.find((entry) => entry.address === wallet)?.label ??
     (smartWallets.length === 0 ? "Derived • Trader" : "Smart Money • Nansen");
-
-  const stats = await computeTraderStats(wallet, { closed: closedTrades });
 
   return NextResponse.json(
     {
@@ -45,6 +49,14 @@ export async function GET(_req: Request, context: { params: { wallet: string } }
         closedAt: trade.closedAt,
       })),
       traderStats: stats,
+      ...(debug
+        ? {
+            debug: {
+              closedProbes,
+              statsProbes: statsDbg.probes,
+            },
+          }
+        : {}),
     },
     {
       headers: {
