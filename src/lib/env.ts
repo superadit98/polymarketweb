@@ -25,3 +25,25 @@ export function inMockMode(): boolean {
   // true if either key is missing (useful for local preview)
   return !getNansenKey();
 }
+
+export function boolEnv(name: string, dflt = false): boolean {
+  const v = process.env[name]?.trim()?.toLowerCase();
+  if (!v) return dflt;
+  return ["1", "true", "yes", "on"].includes(v);
+}
+
+export function getSmartWalletAllowlist(): Array<{ address: string; label: string }> {
+  const raw = process.env.SMART_WALLETS?.trim();
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .map((pair) => {
+      const [addr, label] = pair.split(":");
+      return {
+        address: (addr || "").toLowerCase(),
+        label: label || "Smart • Allowlist",
+      };
+    })
+    .filter((item) => Boolean(item.address));
+}

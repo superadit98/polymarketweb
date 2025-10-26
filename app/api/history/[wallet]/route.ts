@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getWalletTrades } from "@/lib/poly";
 import { getSmartWallets } from "@/lib/nansen";
 import { computeWinRate } from "@/lib/stats";
+import { getSmartWalletAllowlist } from "@/lib/env";
 
 export const revalidate = 0;
 
@@ -12,7 +13,19 @@ export async function GET(_req: Request, context: { params: { wallet: string } }
     getSmartWallets(),
   ]);
 
-  const label = smartWallets.find((entry) => entry.address === wallet)?.label ?? "Smart Money • Nansen";
+  const allowlist = getSmartWalletAllowlist();
+  const combined = [...smartWallets];
+  const seen = new Set(combined.map((entry) => entry.address));
+  for (const entry of allowlist) {
+    if (!seen.has(entry.address)) {
+      combined.push(entry);
+      seen.add(entry.address);
+    }
+  }
+
+  const label =
+    combined.find((entry) => entry.address === wallet)?.label ??
+    (smartWallets.length === 0 ? "Derived • Trader" : "Smart Money • Nansen");
   const winRate = computeWinRate(trades);
 
   return NextResponse.json(

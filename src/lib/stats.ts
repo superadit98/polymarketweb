@@ -1,4 +1,5 @@
 import type { Trade } from "./poly";
+import { boolEnv } from "./env";
 
 export const THRESHOLDS = {
   minTotalTrades: 1000,
@@ -6,7 +7,7 @@ export const THRESHOLDS = {
   minPositionValueUSD: 40_000,
   minRealizedPnlUSD: 50_000,
   minBetSizeUSD: 100,
-  minWinRate: 0.5, // 50%
+  minWinRate: 50,
 };
 
 export type TraderStats = {
@@ -19,9 +20,12 @@ export type TraderStats = {
 
 export function computeWinRate(trades: Trade[]): number {
   const closed = trades.filter((trade) => typeof trade.pnlUSD === "number");
-  if (closed.length === 0) return 0;
   const wins = closed.filter((trade) => (trade.pnlUSD ?? 0) > 0).length;
-  return wins / closed.length;
+  const denom = closed.length;
+  if (denom === 0) {
+    return 0;
+  }
+  return (wins / denom) * 100;
 }
 
 export function aggregateStats(trades: Trade[]): TraderStats {
@@ -53,11 +57,16 @@ export function aggregateStats(trades: Trade[]): TraderStats {
 }
 
 export function passesThresholds(stats: TraderStats): boolean {
+  const limited = boolEnv("USE_LIMITED_MODE", false);
+  const minLargest = limited ? 0 : THRESHOLDS.minLargestWinUSD;
+  const minPnl = limited ? 0 : THRESHOLDS.minRealizedPnlUSD;
+  const minWinRate = limited ? 0 : THRESHOLDS.minWinRate;
+
   return (
     stats.totalTrades > THRESHOLDS.minTotalTrades &&
-    stats.largestWinUSD > THRESHOLDS.minLargestWinUSD &&
+    stats.largestWinUSD > minLargest &&
     stats.positionValueUSD > THRESHOLDS.minPositionValueUSD &&
-    stats.realizedPnlUSD > THRESHOLDS.minRealizedPnlUSD &&
-    stats.winRate > THRESHOLDS.minWinRate
+    stats.realizedPnlUSD > minPnl &&
+    stats.winRate > minWinRate
   );
 }

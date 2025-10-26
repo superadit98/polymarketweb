@@ -26,7 +26,7 @@ function formatPercent(value: number) {
   if (Number.isNaN(value)) {
     return '—';
   }
-  return `${(value * 100).toFixed(1)}%`;
+  return `${value.toFixed(1)}%`;
 }
 
 function formatDate(ts: number) {
