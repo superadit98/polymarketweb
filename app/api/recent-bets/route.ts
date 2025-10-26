@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 
 import { getRecentBets } from '@/lib/service';
 
-const DEFAULT_MIN_BET = 500;
+const DEFAULT_MIN_BET = 100;
 
 export const dynamic = 'force-dynamic';
 

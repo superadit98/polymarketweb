@@ -36,6 +36,77 @@ const MOCK_WALLETS: SmartWallet[] = Array.from({ length: 15 }).map((_, index) =>
   label: index % 2 === 0 ? 'Smart Money Fund' : 'Smart Trader',
 }));
 
+function extractWallets(response: NansenResponse | null | undefined): NansenWallet[] {
+  return (
+    response?.wallets ??
+    response?.items ??
+    response?.data?.wallets ??
+    response?.data?.items ??
+    []
+  ).filter((wallet): wallet is NansenWallet => Boolean(wallet?.address));
+}
+
+function normalizeWallet(wallet: NansenWallet, requestedLabel?: string): SmartWallet | null {
+  if (!wallet?.address) {
+    return null;
+  }
+
+  const labels = wallet.labels ?? [];
+  const matchingLabel = labels.find((item) => {
+    const slug = (item.slug ?? item.label ?? '').toLowerCase();
+    return LABELS.includes(slug);
+  });
+
+  const slugCandidates = [
+    matchingLabel?.label,
+    matchingLabel?.slug,
+    wallet.label,
+    requestedLabel,
+  ].filter((value): value is string => Boolean(value?.length));
+
+  const hasValidSlug = slugCandidates.some((value) => LABELS.includes(value.toLowerCase()));
+  if (!hasValidSlug) {
+    return null;
+  }
+
+  const labelCandidates = [
+    matchingLabel?.name,
+    wallet.name,
+    wallet.label,
+    requestedLabel,
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  return {
+    address: wallet.address,
+    label: labelCandidates[0] ?? 'Smart Trader',
+  } satisfies SmartWallet;
+}
+
+async function fetchWalletBatch(
+  params: URLSearchParams,
+  requestedLabel?: string,
+): Promise<SmartWallet[]> {
+  try {
+    const response = await fetchJson<NansenResponse>(`${NANSEN_URL}?${params.toString()}`, {
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-API-KEY': ENV.nansenApiKey,
+      },
+    });
+
+    return extractWallets(response)
+      .map((wallet) => normalizeWallet(wallet, requestedLabel))
+      .filter((wallet): wallet is SmartWallet => Boolean(wallet));
+  } catch (error) {
+    console.error('Failed to fetch Nansen wallet batch', {
+      label: requestedLabel ?? 'combined',
+      error,
+    });
+    return [];
+  }
+}
+
 export async function fetchSmartWallets(): Promise<SmartWallet[]> {
   if (ENV.useMockData) {
     return MOCK_WALLETS;
@@ -47,65 +118,46 @@ export async function fetchSmartWallets(): Promise<SmartWallet[]> {
     return cachedWallets;
   }
 
-  const searchParams = new URLSearchParams({
+  const combinedParams = new URLSearchParams({
     limit: '200',
+    labels: LABELS.join(','),
   });
 
-  LABELS.forEach((label) => searchParams.append('labels', label));
+  let wallets = await fetchWalletBatch(combinedParams);
 
-  try {
-    const response = await fetchJson<NansenResponse>(`${NANSEN_URL}?${searchParams.toString()}`, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-KEY': ENV.nansenApiKey,
-      },
-    });
+  if (wallets.length === 0) {
+    const perLabel = await Promise.all(
+      LABELS.map((label) =>
+        fetchWalletBatch(
+          new URLSearchParams({
+            limit: '200',
+            labels: label,
+          }),
+          label,
+        ),
+      ),
+    );
 
-    const rawWallets =
-      response.wallets ??
-      response.items ??
-      response.data?.wallets ??
-      response.data?.items ??
-      [];
-
-    const wallets = rawWallets
-      .filter((wallet): wallet is NansenWallet => Boolean(wallet?.address))
-      .map((wallet) => {
-        const labels = wallet.labels ?? [];
-        const matchingLabel = labels.find((item) => {
-          const value = item.label ?? item.slug ?? '';
-          return LABELS.includes(value.toLowerCase());
-        });
-
-        if (!matchingLabel && wallet.label) {
-          const fallbackLabel = wallet.label.toLowerCase();
-          if (!LABELS.includes(fallbackLabel)) {
-            return null;
-          }
-          return {
-            address: wallet.address,
-            label: wallet.name ?? wallet.label ?? 'Smart Trader',
-          } satisfies SmartWallet | null;
-        }
-
-        if (!matchingLabel) {
-          return null;
-        }
-
-        return {
-          address: wallet.address,
-          label: matchingLabel.name ?? matchingLabel.label ?? matchingLabel.slug ?? 'Smart Trader',
-        } satisfies SmartWallet | null;
-      })
-      .filter((wallet): wallet is SmartWallet => Boolean(wallet));
-
-    cachedWallets = wallets;
-    lastFetched = Date.now();
-    return wallets;
-  } catch (error) {
-    console.error('Failed to fetch Nansen smart wallets', error);
-    throw error;
+    wallets = perLabel.flat();
   }
+
+  const deduped = new Map<string, SmartWallet>();
+  wallets.forEach((wallet) => {
+    const key = wallet.address.toLowerCase();
+    if (!deduped.has(key)) {
+      deduped.set(key, wallet);
+    }
+  });
+
+  const normalized = Array.from(deduped.values());
+
+  if (normalized.length === 0) {
+    throw new Error('Nansen did not return any smart wallets for the requested labels.');
+  }
+
+  cachedWallets = normalized;
+  lastFetched = Date.now();
+  return normalized;
 }
 
 export function getMockWallets() {

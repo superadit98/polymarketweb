@@ -44,7 +44,7 @@ type WalletHistory = {
 };
 
 const REFRESH_INTERVAL = 60 * 60 * 1000;
-const DEFAULT_MIN_BET = 500;
+const DEFAULT_MIN_BET = 100;
 const MAX_WALLETS = 50;
 
 function formatUsd(value: number) {
