@@ -6,13 +6,13 @@ export default function handler(_req: NextApiRequest, res: NextApiResponse) {
   const nansenConfigured = Boolean(getNansenKey());
   res.status(200).json({
     env: {
-      POLY_SUBGRAPH_URL: polyConfigured,
+      POLY_API_BASE: polyConfigured,
       NANSEN_API_KEY: nansenConfigured,
     },
     effective: {
       polyUrl: getPolyUrl(),
       mockMode: inMockMode(),
     },
-    note: "If POLY_SUBGRAPH_URL shows false, set it in Vercel project Settings → Environment Variables, then redeploy.",
+    note: "If POLY_API_BASE shows false, set it in Vercel project Settings → Environment Variables, then redeploy.",
   });
 }

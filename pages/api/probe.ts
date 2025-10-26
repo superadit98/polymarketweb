@@ -1,40 +1,44 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { getPolyUrl, hasConfiguredPoly } from "@/lib/env";
-import { probeSubgraph } from "@/lib/polyProbe";
+import { getPolyUrl } from "@/lib/env";
+import { fetchRecentTrades } from "@/lib/poly";
 
-function parseNumber(value: unknown, fallback: number, { min, max }: { min: number; max: number }) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return fallback;
-  return Math.min(max, Math.max(min, num));
+function clamp(value: number, { min, max }: { min: number; max: number }) {
+  return Math.min(max, Math.max(min, value));
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     const debug = String(req.query.debug ?? "") === "1";
-    const hours = parseNumber(req.query.hours, 24, { min: 1, max: 24 * 30 });
-    const limit = Math.floor(parseNumber(req.query.limit, 100, { min: 1, max: 500 }));
+    const hoursRaw = Number(req.query.hours ?? 24);
+    const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? clamp(hoursRaw, { min: 1, max: 24 * 30 }) : 24;
+    const limitRaw = Number(req.query.limit ?? 100);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? clamp(limitRaw, { min: 1, max: 500 }) : 100;
     const since = Math.max(0, Math.floor(Date.now() / 1000 - hours * 3600));
 
-    const polyUrl = getPolyUrl();
-    if (!polyUrl || !hasConfiguredPoly()) {
-      res.status(500).json({ error: "Polymarket subgraph URL is not configured" });
+    const polyBase = getPolyUrl();
+    if (!polyBase) {
+      res.status(500).json({ error: "Polymarket data API base URL is not configured" });
       return;
     }
 
-    const result = await probeSubgraph(polyUrl, since, limit);
+    const trades = await fetchRecentTrades(limit);
+    const filtered = trades.filter((trade) => trade.timestamp >= since);
 
     const payload: Record<string, any> = {
-      ok: result.ok,
-      errors: result.errors,
+      ok: true,
+      variant: "trades",
+      count: filtered.length,
+      sample: filtered.slice(0, 3).map((trade) => ({
+        wallet: trade.wallet,
+        marketId: trade.marketId,
+        sizeUSD: trade.sizeUSD,
+        price: trade.price,
+        timestamp: trade.timestamp,
+      })),
+      errors: [],
       since,
-      url: polyUrl,
+      url: `${polyBase.replace(/\/$/, "")}/trades`,
     };
-
-    if (result.ok) {
-      payload.variant = result.variant;
-      payload.count = result.rows.length;
-      payload.sample = result.rows.slice(0, 3).map((row) => JSON.parse(JSON.stringify(row)));
-    }
 
     if (!debug) {
       res.setHeader("Cache-Control", "public, s-maxage=3600, stale-while-revalidate=60");
@@ -43,6 +47,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(200).json(payload);
   } catch (error: any) {
     console.error("[probe] error", error);
-    res.status(500).json({ error: String(error?.message || error) });
+    res.status(500).json({
+      ok: false,
+      errors: [String(error?.message || error || "Unknown error")],
+    });
   }
 }

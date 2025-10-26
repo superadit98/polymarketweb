@@ -13,12 +13,11 @@ Create a `.env.local` file for local development:
 
 ```
 NANSEN_API_KEY=your-nansen-api-key
-POLY_SUBGRAPH_URL=https://api.goldsky.com/api/public/project_clgogxv6v1b5d01vl7r5g53e2/subgraphs/polymarket-trades/0.0.1/gn
-POLY_REST_BASE=https://polymarket.com/api # optional override
+POLY_API_BASE=https://data-api.polymarket.com
 LOG_LEVEL=info
 ```
 
-Both the Nansen and Polymarket subgraph keys must be present for live data. If either is missing the API endpoints return a `200` response with an empty list and the `X-Mock: 1` header so the UI stays functional.
+The backend now talks directly to the public Polymarket Data API. The `POLY_API_BASE` entry defaults to the production endpoint, so you only need to override it when pointing at a staging cluster.
 
 ## Getting started
 
@@ -78,11 +77,11 @@ The project ships with ESLint (Next.js config) and Prettier 3. Run `npm run lint
 
 ## Deployment
 
-Deploying to Vercel requires setting `NANSEN_API_KEY` and `POLY_SUBGRAPH_URL` (plus optional `POLY_REST_BASE`) in the Vercel dashboard (Project Settings → Environment Variables). Once configured, redeploy with:
+Deploying to Vercel requires setting `NANSEN_API_KEY` and `POLY_API_BASE` in the Vercel dashboard (Project Settings → Environment Variables). Once configured, redeploy with:
 
 ```bash
 vercel deploy --prod
 ```
 
-After deploying you can hit `/api/debug` to confirm connectivity—successful probes will report `subgraphProbe.ok` and `restProbe.ok` as `true`.
+After deploying you can hit `/api/debug` to confirm connectivity or `/api/probe` to fetch a live sample from the Polymarket Data API.
 

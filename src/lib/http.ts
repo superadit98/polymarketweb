@@ -18,11 +18,3 @@ export async function fetchJson<T = any>(url: string, opts: FetchOpts = {}): Pro
   }
 }
 
-export async function postGraphQL<T = any>(url: string, query: string, variables?: Record<string, any>, opts: FetchOpts = {}) {
-  return fetchJson<T>(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...(opts.headers || {}) },
-    body: JSON.stringify({ query, variables }),
-    timeoutMs: opts.timeoutMs ?? 15_000,
-  });
-}

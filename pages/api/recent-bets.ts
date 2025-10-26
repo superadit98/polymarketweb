@@ -1,77 +1,86 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { getPolyUrl, hasConfiguredPoly } from "@/lib/env";
-import { probeSubgraph } from "@/lib/polyProbe";
+import { getPolyUrl } from "@/lib/env";
+import { THRESHOLDS, attachStatsToTrades, fetchRecentBets, filterSmartTraders, meetsTraderThresholds } from "@/lib/poly";
+import type { RecentBetsResponse } from "@/types";
+
+function parseNumber(value: unknown, fallback: number, { min, max }: { min: number; max: number }) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const debug = String(req.query.debug ?? "") === "1";
-  const minBet = Math.max(0, Number(req.query.minBet ?? 500));
-  const hoursRaw = Number(req.query.hours ?? 24);
-  const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? Math.min(hoursRaw, 24 * 30) : 24;
+  const minBetRaw = Number(req.query.minBet ?? THRESHOLDS.minBetSizeUSD);
+  const minBet = Number.isFinite(minBetRaw) && minBetRaw > 0 ? minBetRaw : THRESHOLDS.minBetSizeUSD;
+  const hours = parseNumber(req.query.hours, 24, { min: 1, max: 24 * 30 });
+  const since = Math.max(0, Math.floor(Date.now() / 1000 - hours * 3600));
 
   const meta: {
     hours: number;
     minBet: number;
-    probe: { ok: boolean; variant?: string; errors: string[] };
     counts: {
-      nansenWallets: number;
-      subgraphRows: number;
-      afterSmart: number;
+      tradesFetched: number;
+      walletsEnriched: number;
+      afterStats: number;
+      afterThresholds: number;
       afterMinBet: number;
     };
+    probe: { ok: boolean; variant?: string; errors: string[] };
     errors: string[];
   } = {
     hours,
     minBet,
+    counts: {
+      tradesFetched: 0,
+      walletsEnriched: 0,
+      afterStats: 0,
+      afterThresholds: 0,
+      afterMinBet: 0,
+    },
     probe: { ok: false, errors: [] },
-    counts: { nansenWallets: 0, subgraphRows: 0, afterSmart: 0, afterMinBet: 0 },
     errors: [],
   };
 
   try {
-    const polyUrl = getPolyUrl();
-    if (!polyUrl || !hasConfiguredPoly()) {
-      res.status(500).json({ error: "Polymarket subgraph URL is not configured" });
+    const polyBase = getPolyUrl();
+    if (!polyBase) {
+      res.status(500).json({ error: "Polymarket data API base URL is not configured" });
       return;
     }
 
-    const since = Math.max(0, Math.floor(Date.now() / 1000 - hours * 3600));
-    const probeResult = await probeSubgraph(polyUrl, since, 100);
+    const { trades, stats } = await fetchRecentBets(200);
+    meta.counts.tradesFetched = trades.length;
+    meta.counts.walletsEnriched = stats.size;
 
-    meta.probe = {
-      ok: probeResult.ok,
-      variant: probeResult.variant,
-      errors: probeResult.errors,
-    };
+    const enriched = attachStatsToTrades(trades, stats, since);
+    meta.counts.afterStats = enriched.length;
 
-    if (!probeResult.ok) {
-      meta.errors.push("Subgraph probe failed");
-      if (debug) {
-        res.status(500).json({ error: "Subgraph query failed", meta });
-      } else {
-        res.status(500).json({ error: "Subgraph query failed" });
-      }
+    const afterThresholds = enriched.filter((bet) => meetsTraderThresholds(bet.traderStats));
+    meta.counts.afterThresholds = afterThresholds.length;
+
+    const sizeThreshold = Math.max(minBet, THRESHOLDS.minBetSizeUSD);
+    meta.counts.afterMinBet = afterThresholds.filter((bet) => bet.sizeUSD >= sizeThreshold).length;
+
+    const items = filterSmartTraders(enriched, minBet);
+    meta.probe = { ok: true, variant: "trades", errors: [] };
+
+    const payload: RecentBetsResponse = { items };
+    if (debug) {
+      res.status(200).json({ ...payload, meta });
       return;
     }
 
-    meta.counts.subgraphRows = probeResult.rows.length;
-
-    const items: any[] = [];
-    meta.counts.afterSmart = items.length;
-    meta.counts.afterMinBet = items.length;
-
-    if (!debug) {
-      res.setHeader("Cache-Control", "public, s-maxage=3600, stale-while-revalidate=60");
-      res.status(200).json(items);
-      return;
-    }
-
-    res.status(200).json({ items, meta });
+    res.setHeader("Cache-Control", "public, s-maxage=3600, stale-while-revalidate=60");
+    res.status(200).json(payload);
   } catch (error: any) {
     console.error("[recent-bets] error", error);
+    const message = String(error?.message || error || "Unknown error");
     if (debug) {
-      res.status(500).json({ error: String(error?.message || error), meta });
-    } else {
-      res.status(500).json({ error: String(error?.message || error) });
+      meta.errors.push(message);
+      res.status(500).json({ error: "Failed to fetch recent bets", meta });
+      return;
     }
+    res.status(500).json({ error: "Failed to fetch recent bets" });
   }
 }
