@@ -6,13 +6,15 @@ function getNansenKey(): string {
   return process.env.NANSEN_API_KEY?.trim() || DEFAULT_NANSEN_KEY;
 }
 
-export async function getSmartWallets(): Promise<SmartWallet[]> {
-  const apiKey = getNansenKey();
+async function fetchWalletCategory(
+  path: string,
+  fallbackLabel: string,
+  apiKey: string
+): Promise<SmartWallet[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10_000);
   try {
-    const url = "https://api.nansen.ai/wallets/smart-money";
-    const res = await fetch(url, {
+    const res = await fetch(`https://api.nansen.ai/wallets/${path}`, {
       headers: {
         "x-api-key": apiKey,
       },
@@ -24,19 +26,22 @@ export async function getSmartWallets(): Promise<SmartWallet[]> {
       return [];
     }
 
-    const data = await res.json().catch(() => null);
-    const wallets = Array.isArray(data?.wallets) ? data.wallets : [];
+    const payload = await res.json().catch(() => null);
+    const entries = Array.isArray(payload?.wallets)
+      ? payload.wallets
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload)
+          ? payload
+          : [];
 
-    const seen = new Set<string>();
     const normalized: SmartWallet[] = [];
-
-    for (const entry of wallets) {
-      const address = String(entry?.address ?? "").toLowerCase();
-      if (!address || seen.has(address)) {
+    for (const item of entries) {
+      const address = String(item?.address ?? item?.wallet ?? "").toLowerCase();
+      if (!address) {
         continue;
       }
-      seen.add(address);
-      const label = entry?.label ? String(entry.label) : "Smart Money • Nansen";
+      const label = item?.label ? String(item.label) : fallbackLabel;
       normalized.push({ address, label });
     }
 
@@ -46,6 +51,31 @@ export async function getSmartWallets(): Promise<SmartWallet[]> {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+export async function getSmartWallets(): Promise<SmartWallet[]> {
+  const apiKey = getNansenKey();
+  const categories: Array<[string, string]> = [
+    ["smart-money", "Smart Money • Nansen"],
+    ["smart-traders", "Smart Trader • Nansen"],
+    ["whales", "Whale • Nansen"],
+  ];
+
+  const combined: SmartWallet[] = [];
+  const seen = new Set<string>();
+
+  for (const [path, fallback] of categories) {
+    const wallets = await fetchWalletCategory(path, fallback, apiKey);
+    for (const wallet of wallets) {
+      if (!wallet.address || seen.has(wallet.address)) {
+        continue;
+      }
+      seen.add(wallet.address);
+      combined.push(wallet);
+    }
+  }
+
+  return combined;
 }
 
 export function hasNansenKey(): boolean {

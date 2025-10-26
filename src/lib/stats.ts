@@ -2,9 +2,9 @@ import type { Trade } from "./poly";
 import { boolEnv } from "./env";
 
 export const THRESHOLDS = {
-  minTotalTrades: 1000,
+  minTotalTrades: 100,
   minLargestWinUSD: 10_000,
-  minPositionValueUSD: 40_000,
+  minPositionValueUSD: 10_000,
   minRealizedPnlUSD: 50_000,
   minBetSizeUSD: 100,
   minWinRate: 50,
