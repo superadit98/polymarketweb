@@ -1,48 +1,23 @@
-import { logger } from './log';
+const DEFAULT_POLY =
+  "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn";
 
-type AppEnv = {
-  nansenApiKey: string;
-  polySubgraphUrl: string;
-  polyRestBase: string;
-  logLevel: string;
-};
-
-const nansenApiKey = process.env.NANSEN_API_KEY?.trim() ?? '';
-const polySubgraphUrl = process.env.POLY_SUBGRAPH_URL?.trim() ?? '';
-const polyRestBase = (process.env.POLY_REST_BASE?.trim() ?? 'https://polymarket.com/api').replace(/\/$/, '');
-const logLevel = process.env.LOG_LEVEL?.trim() ?? 'info';
-
-export const env: AppEnv = {
-  nansenApiKey,
-  polySubgraphUrl,
-  polyRestBase,
-  logLevel,
-};
-
-export const hasNansen = nansenApiKey.length > 0;
-export const hasPolySubgraph = polySubgraphUrl.length > 0;
-
-logger.setLevel(logLevel);
-
-const bootLogKey = Symbol.for('smartTraders.envLogged');
-const bootStore = globalThis as typeof globalThis & {
-  [bootLogKey]?: boolean;
-};
-
-if (!bootStore[bootLogKey]) {
-  bootStore[bootLogKey] = true;
-  logger.info('[env] configuration loaded', {
-    hasNansen,
-    hasPolySubgraph,
-    polyRestBase,
-    logLevel,
-  });
+export function getPolyUrl(): string | null {
+  const raw = process.env.POLY_SUBGRAPH_URL?.trim();
+  if (raw && raw.startsWith("http")) return raw;
+  // Fallback: comment this line if you want *strict* env only
+  return DEFAULT_POLY;
 }
 
-export function requireEnv(name: keyof AppEnv) {
-  const value = env[name];
-  if (!value) {
-    throw new Error(`${name} is not configured`);
-  }
-  return value;
+export function hasConfiguredPoly(): boolean {
+  const raw = process.env.POLY_SUBGRAPH_URL?.trim();
+  return Boolean(raw && raw.startsWith("http"));
+}
+
+export function getNansenKey(): string | null {
+  return process.env.NANSEN_API_KEY?.trim() || null;
+}
+
+export function inMockMode(): boolean {
+  // true if either key is missing (useful for local preview)
+  return !getNansenKey();
 }
