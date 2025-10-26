@@ -35,6 +35,27 @@ async function querySubgraph<T>(query: string, variables: Record<string, unknown
   return payload.data;
 }
 
+async function queryWithFallback<T>(
+  primaryQuery: string,
+  fallbackQuery: string | null,
+  variables: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await querySubgraph<T>(primaryQuery, variables);
+  } catch (error) {
+    const message = (error as Error).message;
+    const shouldFallback =
+      Boolean(fallbackQuery) && /Cannot query field|Unknown argument/i.test(message);
+
+    if (!shouldFallback || !fallbackQuery) {
+      throw error;
+    }
+
+    console.error('Retrying subgraph query with fallback selection', { message });
+    return querySubgraph<T>(fallbackQuery, variables);
+  }
+}
+
 type TraderStatsQuery = {
   trader: null | {
     id: string;
@@ -53,6 +74,16 @@ const TRADER_STATS_QUERY = `
       largestWinUsd
       currentPositionUsd
       realizedPnlUsd
+    }
+  }
+`;
+
+const TRADER_STATS_QUERY_FALLBACK = `
+  query TraderStatsFallback($id: ID!) {
+    trader(id: $id) {
+      id
+      totalTrades
+      currentPositionUsd
     }
   }
 `;
@@ -137,6 +168,28 @@ const TRADE_HISTORY_QUERY = `
   }
 `;
 
+const TRADE_HISTORY_QUERY_FALLBACK = `
+  query TraderHistoryFallback($trader: String!, $limit: Int!) {
+    fills(
+      first: $limit,
+      orderBy: timestamp,
+      orderDirection: desc,
+      where: { trader: $trader }
+    ) {
+      id
+      outcome
+      price
+      usdValue
+      timestamp
+      market {
+        id
+        question
+        slug
+      }
+    }
+  }
+`;
+
 const MARKET_URL_BASE = 'https://polymarket.com/market';
 
 const MOCK_MARKETS = [
@@ -149,7 +202,9 @@ const MOCK_MARKETS = [
 
 function buildMarketUrl(market: { id: string; slug?: string | null }) {
   if (market.slug) {
-    return `https://polymarket.com/event/${market.slug}`;
+    const url = new URL(`https://polymarket.com/event/${market.slug}`);
+    url.searchParams.set('marketId', market.id);
+    return url.toString();
   }
   return `${MARKET_URL_BASE}/${market.id}`;
 }
@@ -172,9 +227,13 @@ export async function fetchTraderStats(address: string): Promise<TraderStats> {
   }
 
   try {
-    const data = await querySubgraph<TraderStatsQuery>(TRADER_STATS_QUERY, {
-      id: address.toLowerCase(),
-    });
+    const data = await queryWithFallback<TraderStatsQuery>(
+      TRADER_STATS_QUERY,
+      TRADER_STATS_QUERY_FALLBACK,
+      {
+        id: address.toLowerCase(),
+      },
+    );
 
     if (!data.trader) {
       return {
@@ -186,11 +245,14 @@ export async function fetchTraderStats(address: string): Promise<TraderStats> {
       };
     }
 
+    const largestWin = parseNumber(data.trader.largestWinUsd);
+    const realized = parseNumber(data.trader.realizedPnlUsd);
+
     return {
       totalTrades: parseNumber(data.trader.totalTrades),
-      largestWinUSD: parseNumber(data.trader.largestWinUsd),
+      largestWinUSD: largestWin,
       positionValueUSD: parseNumber(data.trader.currentPositionUsd),
-      realizedPnlUSD: parseNumber(data.trader.realizedPnlUsd),
+      realizedPnlUSD: realized,
       winRate: 0,
     };
   } catch (error) {
@@ -231,7 +293,9 @@ export async function fetchRecentBets(
       limit: RECENT_BETS_LIMIT,
     });
 
-    return data.fills.map((fill) => ({
+    const fills = Array.isArray(data.fills) ? data.fills : [];
+
+    return fills.map((fill) => ({
       wallet: wallet.address,
       label: wallet.label,
       outcome: fill.outcome,
@@ -280,14 +344,28 @@ export async function fetchWalletHistory(wallet: SmartWallet): Promise<WalletHis
   }
 
   try {
-    const data = await querySubgraph<TradeHistoryQuery>(TRADE_HISTORY_QUERY, {
-      trader: wallet.address.toLowerCase(),
-      limit: HISTORY_LIMIT,
-    });
+    const data = await queryWithFallback<TradeHistoryQuery>(
+      TRADE_HISTORY_QUERY,
+      TRADE_HISTORY_QUERY_FALLBACK,
+      {
+        trader: wallet.address.toLowerCase(),
+        limit: HISTORY_LIMIT,
+      },
+    );
 
-    const rows = data.fills.map((fill) => {
+    const fills = Array.isArray(data.fills) ? data.fills : [];
+
+    const rows = fills.map((fill) => {
       const pnl = fill.realizedPnlUsd != null ? parseNumber(fill.realizedPnlUsd) : 0;
-      const result = fill.status === 'Win' || fill.status === 'Loss' ? fill.status : pnl > 0 ? 'Win' : pnl < 0 ? 'Loss' : 'Pending';
+      const status = fill.status;
+      const result =
+        status === 'Win' || status === 'Loss'
+          ? status
+          : pnl > 0
+            ? 'Win'
+            : pnl < 0
+              ? 'Loss'
+              : 'Pending';
       const closedAt = fill.closedAt ? Number(fill.closedAt) : undefined;
       return {
         marketId: fill.market.id,
