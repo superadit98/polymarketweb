@@ -50,6 +50,14 @@ export interface ResponseMeta {
   mock?: boolean;
   reason?: string;
   fallback?: 'rest';
+  mode?: string;
+  counts?: {
+    fetched?: number;
+    timeFiltered?: number;
+    minBet?: number;
+    wallets?: number;
+    items?: number;
+  };
 }
 
 export interface RecentBetsResponse {
