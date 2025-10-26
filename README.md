@@ -13,7 +13,7 @@ Create a `.env.local` file for local development:
 
 ```
 NANSEN_API_KEY=your-nansen-api-key
-POLY_SUBGRAPH_URL=https://your-goldsky-polymarket-subgraph
+POLY_SUBGRAPH_URL=https://api.goldsky.com/api/public/project_clgogxv6v1b5d01vl7r5g53e2/subgraphs/polymarket-trades/0.0.1/gn
 POLY_REST_BASE=https://polymarket.com/api # optional override
 LOG_LEVEL=info
 ```

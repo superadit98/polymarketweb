@@ -8,7 +8,7 @@ afterEach(() => {
 
 describe("env helpers", () => {
   it("returns default poly url when env missing", () => {
-    expect(getPolyUrl()).toContain("activity-subgraph");
+    expect(getPolyUrl()).toContain("polymarket-trades");
     expect(hasConfiguredPoly()).toBe(false);
   });
 

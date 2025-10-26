@@ -1,6 +1,6 @@
 import { postGraphQL } from "@/lib/http";
 
-export type ProbeVariant = "fills" | "marketFills" | "transactions";
+export type ProbeVariant = "trades" | "fills" | "marketFills" | "transactions";
 
 interface VariantConfig {
   key: ProbeVariant;
@@ -9,6 +9,26 @@ interface VariantConfig {
 }
 
 const VARIANTS: VariantConfig[] = [
+  {
+    key: "trades",
+    query: `query Recent($since: BigInt!, $limit: Int!) {
+  trades(
+    first: $limit
+    orderBy: timestamp
+    orderDirection: desc
+    where: { timestamp_gte: $since }
+  ) {
+    id
+    outcome
+    size
+    price
+    timestamp
+    maker
+    market { id question }
+  }
+}`,
+    selector: (data: any) => (Array.isArray(data?.trades) ? data.trades : undefined),
+  },
   {
     key: "fills",
     query: `query Recent($since: BigInt!, $limit: Int!) {

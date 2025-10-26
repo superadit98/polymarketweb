@@ -1,5 +1,5 @@
 const DEFAULT_POLY =
-  "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/activity-subgraph/0.0.4/gn";
+  "https://api.goldsky.com/api/public/project_clgogxv6v1b5d01vl7r5g53e2/subgraphs/polymarket-trades/0.0.1/gn";
 
 export function getPolyUrl(): string | null {
   const raw = process.env.POLY_SUBGRAPH_URL?.trim();
