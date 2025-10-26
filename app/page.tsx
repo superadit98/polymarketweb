@@ -52,7 +52,11 @@ export default function HomePage() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/recent-bets?minBet=${DEFAULT_MIN_BET}`);
+      const params = new URLSearchParams({
+        minBet: String(DEFAULT_MIN_BET),
+        relax: '1',
+      });
+      const response = await fetch(`/api/recent-bets?${params.toString()}`);
       const requestId = response.headers.get('x-request-id') ?? undefined;
       if (!response.ok) {
         const payload = await response

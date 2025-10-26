@@ -7,6 +7,18 @@ import { norm } from "@/lib/util/addr";
 import { TTLCache } from "@/lib/cache";
 import { computeTraderStats, TraderStats, ProbeNote } from "@/lib/poly-data";
 
+const RELAX_FALLBACK = (process.env.ALLOW_TRADES_ONLY ?? "1") === "1";
+
+function isTradesOnly(stats: TraderStats | { [key: string]: unknown } | null | undefined): boolean {
+  if (!stats) return false;
+  const totalTrades = Number((stats as TraderStats).totalTrades ?? 0);
+  const largestWinUSD = Number((stats as TraderStats).largestWinUSD ?? 0);
+  const positionValueUSD = Number((stats as TraderStats).positionValueUSD ?? 0);
+  const realizedPnlUSD = Number((stats as TraderStats).realizedPnlUSD ?? 0);
+  const winRate = Number((stats as TraderStats).winRate ?? 0);
+  return totalTrades > 0 && largestWinUSD === 0 && positionValueUSD === 0 && realizedPnlUSD === 0 && winRate === 0;
+}
+
 export const revalidate = 0;
 
 function toNumber(value: unknown, fallback: number): number {
@@ -49,7 +61,8 @@ export async function GET(req: Request) {
   const hours = toNumber(searchParams.get("hours"), 24);
   const minBet = toNumber(searchParams.get("minBet"), THRESHOLDS.minBetSizeUSD);
   const debug = searchParams.get("debug") === "1";
-  const relax = searchParams.get("relax") === "1";
+  const relaxParam = searchParams.get("relax") === "1";
+  const relax = relaxParam || RELAX_FALLBACK;
   const since = Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600;
   const limitedMode = boolEnv("USE_LIMITED_MODE", false);
 
@@ -170,9 +183,14 @@ export async function GET(req: Request) {
   );
 
   const sorted = enriched.slice().sort((a, b) => b.sizeUSD - a.sizeUSD);
-  const filtered = relax
-    ? sorted
-    : sorted.filter((item) => passesThresholds(item.traderStats));
+  let tradesOnlyCount = 0;
+  const filtered = sorted.filter((item) => {
+    if (relax && isTradesOnly(item.traderStats)) {
+      tradesOnlyCount += 1;
+      return true;
+    }
+    return passesThresholds(item.traderStats);
+  });
   const items = filtered.slice(0, 50);
 
   const walletsWithStats = Object.values(dbgPerWallet).filter((entry) => {
@@ -188,7 +206,7 @@ export async function GET(req: Request) {
     meta: {
       hours,
       minBet,
-      limitedMode,
+      limitedMode: limitedMode || relax,
       usedFallback,
       relax,
       hasNansenKey: hasNansenKey(),
@@ -198,6 +216,7 @@ export async function GET(req: Request) {
         walletsWithStats,
         afterWindowSmartMinBet: windowedTrades.length,
         afterThresholds: items.length,
+        walletsTradesOnly: tradesOnlyCount,
       },
     },
   };
