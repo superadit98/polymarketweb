@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { getRecentTrades } from "@/lib/poly";
 import { getSmartWallets, hasNansenKey } from "@/lib/nansen";
-import { THRESHOLDS, aggregateStats, passesThresholds } from "@/lib/stats";
+import { THRESHOLDS, passesThresholds } from "@/lib/stats";
 import { boolEnv, getSmartWalletAllowlist } from "@/lib/env";
 import { norm } from "@/lib/util/addr";
+import { TTLCache } from "@/lib/cache";
+import { computeTraderStats, TraderStats } from "@/lib/poly-data";
 
 export const revalidate = 0;
 
@@ -12,10 +14,34 @@ function toNumber(value: unknown, fallback: number): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+const statsCache = new TTLCache<TraderStats | { _err?: string }>(60 * 60 * 1000);
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let index = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (index < items.length) {
+      const currentIndex = index++;
+      try {
+        results[currentIndex] = await mapper(items[currentIndex]);
+      } catch (error) {
+        throw error;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const hours = toNumber(searchParams.get("hours"), 24);
   const minBet = toNumber(searchParams.get("minBet"), THRESHOLDS.minBetSizeUSD);
+  const debug = searchParams.get("debug") === "1";
   const since = Math.floor(Date.now() / 1000) - Math.max(1, hours) * 3600;
   const limitedMode = boolEnv("USE_LIMITED_MODE", false);
 
@@ -69,60 +95,91 @@ export async function GET(req: Request) {
     grouped.get(key)!.push(trade);
   }
 
-  const items = Array.from(grouped.entries())
-    .map(([walletLower, trades]) => {
-      const stats = aggregateStats(trades);
-      const mostRecent = trades.reduce(
-        (acc, trade) => (trade.timestamp > acc.timestamp ? trade : acc),
-        trades[0]
-      );
-      const largestSize = trades.reduce((max, trade) => Math.max(max, trade.sizeUSD), 0);
+  const walletKeys = Array.from(grouped.keys());
+  const enriched = await mapWithConcurrency(walletKeys, 6, async (wallet) => {
+        const cached = statsCache.get(wallet);
+        let stats = cached as TraderStats | { _err?: string } | undefined;
+        if (!stats) {
+          try {
+            stats = await computeTraderStats(wallet);
+            statsCache.set(wallet, stats);
+          } catch (error: any) {
+            stats = { _err: String(error?.message || error) };
+          }
+        }
 
-      return {
-        wallet: walletLower,
-        label:
-          labelMap.get(walletLower) ??
-          (usedFallback ? "Derived • Recent Trader" : "Smart • Unknown"),
-        outcome: mostRecent.outcome,
-        sizeUSD: largestSize,
-        price: mostRecent.price,
-        marketId: mostRecent.marketId,
-        marketQuestion: mostRecent.marketQuestion,
-        marketUrl: mostRecent.marketUrl,
-        traderStats: stats,
-        timestamp: mostRecent.timestamp,
-      };
-    })
+        const trades = grouped.get(wallet)!;
+        const mostRecent = trades.reduce(
+          (acc, trade) => (trade.timestamp > acc.timestamp ? trade : acc),
+          trades[0]
+        );
+        const largestSize = trades.reduce((max, trade) => Math.max(max, trade.sizeUSD), 0);
+
+        const resolvedStats: TraderStats =
+          stats && "_err" in (stats as Record<string, unknown>)
+            ? {
+                totalTrades: 0,
+                largestWinUSD: 0,
+                positionValueUSD: 0,
+                realizedPnlUSD: 0,
+                winRate: 0,
+              }
+            : {
+                totalTrades: (stats as TraderStats)?.totalTrades ?? 0,
+                largestWinUSD: (stats as TraderStats)?.largestWinUSD ?? 0,
+                positionValueUSD: (stats as TraderStats)?.positionValueUSD ?? 0,
+                realizedPnlUSD: (stats as TraderStats)?.realizedPnlUSD ?? 0,
+                winRate: (stats as TraderStats)?.winRate ?? 0,
+              };
+
+        return {
+          wallet,
+          label:
+            labelMap.get(wallet) ??
+            (usedFallback ? "Derived • Recent Trader" : "Smart • Unknown"),
+          outcome: mostRecent.outcome,
+          sizeUSD: largestSize,
+          price: mostRecent.price,
+          marketId: mostRecent.marketId,
+          marketQuestion: mostRecent.marketQuestion,
+          marketUrl: mostRecent.marketUrl,
+          traderStats: resolvedStats,
+          timestamp: mostRecent.timestamp,
+        };
+  });
+
+  const items = enriched
     .filter((item) => passesThresholds(item.traderStats))
     .sort((a, b) => b.sizeUSD - a.sizeUSD)
     .slice(0, 50);
 
-  return NextResponse.json(
-    {
-      items: items.map((item) => ({
-        ...item,
-        traderStats: {
-          ...item.traderStats,
-        },
-      })),
-      meta: {
-        hours,
-        minBet,
-        limitedMode,
-        usedFallback,
-        hasNansenKey: hasNansenKey(),
-        counts: {
-          tradesFetched,
-          walletsEnriched: smartWallets.length,
-          afterWindowSmartMinBet: filteredTrades.length,
-          afterThresholds: items.length,
-        },
+  const body: Record<string, unknown> = {
+    items,
+    meta: {
+      hours,
+      minBet,
+      limitedMode,
+      usedFallback,
+      hasNansenKey: hasNansenKey(),
+      counts: {
+        tradesFetched,
+        walletsEnriched: smartWallets.length,
+        walletsWithStats: enriched.length,
+        afterWindowSmartMinBet: filteredTrades.length,
+        afterThresholds: items.length,
       },
     },
-    {
-      headers: {
-        "Cache-Control": "s-maxage=600, stale-while-revalidate=60",
-      },
-    }
-  );
+  };
+
+  if (debug) {
+    (body as any).debug = {
+      sampled: enriched.slice(0, 3),
+    };
+  }
+
+  return NextResponse.json(body, {
+    headers: {
+      "Cache-Control": "s-maxage=600, stale-while-revalidate=60",
+    },
+  });
 }
