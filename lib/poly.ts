@@ -1,115 +1,40 @@
-import { ENV, assertPolyAccess } from './env';
+import { ENV, isMockMode } from './env';
 import { fetchJson } from './http';
-import { computeWinRate } from './stats';
+import { computeWinRate, safeNumber } from './stats';
 import type {
+  HistoryRow,
   RecentBet,
+  ResponseMeta,
   SmartWallet,
-  TradeHistoryRow,
   TraderStats,
   WalletHistory,
-} from './types';
+} from '../types';
+import { getMockWallets } from './nansen';
 
-const RECENT_BETS_LIMIT = 100;
+const RECENT_LIMIT = 60;
 const HISTORY_LIMIT = 200;
+const MARKET_URL_BASE = 'https://polymarket.com/event';
 
-interface GraphQlResponse<T> {
-  data: T;
-  errors?: Array<{ message: string }>;
-}
-
-async function querySubgraph<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  assertPolyAccess();
-
-  const payload = await fetchJson<GraphQlResponse<T>>(ENV.polySubgraphUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  if (payload.errors && payload.errors.length > 0) {
-    throw new Error(payload.errors.map((error) => error.message).join(', '));
-  }
-
-  return payload.data;
-}
-
-async function queryWithFallback<T>(
-  primaryQuery: string,
-  fallbackQuery: string | null,
-  variables: Record<string, unknown>,
-): Promise<T> {
-  try {
-    return await querySubgraph<T>(primaryQuery, variables);
-  } catch (error) {
-    const message = (error as Error).message;
-    const shouldFallback =
-      Boolean(fallbackQuery) && /Cannot query field|Unknown argument/i.test(message);
-
-    if (!shouldFallback || !fallbackQuery) {
-      throw error;
-    }
-
-    console.error('Retrying subgraph query with fallback selection', { message });
-    return querySubgraph<T>(fallbackQuery, variables);
-  }
-}
-
-type TraderStatsQuery = {
-  trader: null | {
-    id: string;
-    totalTrades?: string;
-    largestWinUsd?: string;
-    currentPositionUsd?: string;
-    realizedPnlUsd?: string;
-  };
-};
-
-const TRADER_STATS_QUERY = `
-  query TraderStats($id: ID!) {
-    trader(id: $id) {
+const TRADER_OVERVIEW_QUERY = `
+  query TraderOverview(
+    $id: ID!
+    $wallet: String!
+    $minUsd: BigDecimal!
+    $recentLimit: Int!
+    $historyLimit: Int!
+  ) {
+    trader: trader(id: $id) {
       id
       totalTrades
       largestWinUsd
       currentPositionUsd
       realizedPnlUsd
     }
-  }
-`;
-
-const TRADER_STATS_QUERY_FALLBACK = `
-  query TraderStatsFallback($id: ID!) {
-    trader(id: $id) {
-      id
-      totalTrades
-      currentPositionUsd
-    }
-  }
-`;
-
-type RecentFillsQuery = {
-  fills: Array<{
-    id: string;
-    outcome: 'YES' | 'NO';
-    price: string;
-    usdValue: string;
-    timestamp: string;
-    market: {
-      id: string;
-      question: string;
-      slug?: string | null;
-    };
-  }>;
-};
-
-const RECENT_FILLS_QUERY = `
-  query RecentFills($trader: String!, $minUsd: BigDecimal!, $limit: Int!) {
-    fills(
-      first: $limit,
-      orderBy: timestamp,
-      orderDirection: desc,
-      where: { trader: $trader, usdValue_gte: $minUsd }
+    recent: fills(
+      first: $recentLimit
+      orderBy: timestamp
+      orderDirection: desc
+      where: { trader: $wallet, usdValue_gte: $minUsd }
     ) {
       id
       outcome
@@ -122,34 +47,11 @@ const RECENT_FILLS_QUERY = `
         slug
       }
     }
-  }
-`;
-
-type TradeHistoryQuery = {
-  fills: Array<{
-    id: string;
-    outcome: 'YES' | 'NO';
-    price: string;
-    usdValue: string;
-    realizedPnlUsd?: string | null;
-    status?: 'Win' | 'Loss' | 'Pending';
-    closedAt?: string | null;
-    timestamp: string;
-    market: {
-      id: string;
-      question: string;
-      slug?: string | null;
-    };
-  }>;
-};
-
-const TRADE_HISTORY_QUERY = `
-  query TraderHistory($trader: String!, $limit: Int!) {
-    fills(
-      first: $limit,
-      orderBy: timestamp,
-      orderDirection: desc,
-      where: { trader: $trader }
+    history: fills(
+      first: $historyLimit
+      orderBy: timestamp
+      orderDirection: desc
+      where: { trader: $wallet }
     ) {
       id
       outcome
@@ -168,228 +70,324 @@ const TRADE_HISTORY_QUERY = `
   }
 `;
 
-const TRADE_HISTORY_QUERY_FALLBACK = `
-  query TraderHistoryFallback($trader: String!, $limit: Int!) {
-    fills(
-      first: $limit,
-      orderBy: timestamp,
-      orderDirection: desc,
-      where: { trader: $trader }
-    ) {
-      id
-      outcome
-      price
-      usdValue
-      timestamp
-      market {
-        id
-        question
-        slug
-      }
-    }
-  }
-`;
+type TraderOverviewResponse = {
+  data?: {
+    trader?: {
+      totalTrades?: string | null;
+      largestWinUsd?: string | null;
+      currentPositionUsd?: string | null;
+      realizedPnlUsd?: string | null;
+    } | null;
+    recent?: Array<{
+      id: string;
+      outcome: 'YES' | 'NO';
+      price?: string | null;
+      usdValue?: string | null;
+      timestamp?: string | null;
+      market?: { id: string; question: string; slug?: string | null } | null;
+    }>;
+    history?: Array<{
+      id: string;
+      outcome: 'YES' | 'NO';
+      price?: string | null;
+      usdValue?: string | null;
+      realizedPnlUsd?: string | null;
+      status?: string | null;
+      closedAt?: string | null;
+      timestamp?: string | null;
+      market?: { id: string; question: string; slug?: string | null } | null;
+    }>;
+  };
+  errors?: Array<{ message?: string }>;
+};
 
-const MARKET_URL_BASE = 'https://polymarket.com/market';
+export type WalletData = {
+  stats: TraderStats;
+  recentBets: RecentBet[];
+  historyRows: HistoryRow[];
+};
 
-const MOCK_MARKETS = [
-  'Will Bitcoin close above $100k in 2024?',
-  'Will the Fed cut rates before September 2024?',
-  'Will ETH ETF be approved by 2025?',
-  'Will AI regulation pass in the US by 2025?',
-  'Will SpaceX Starship reach orbit before 2025?',
-];
+export type WalletDataResult =
+  | { ok: true; data: WalletData }
+  | { ok: false; error: string; meta?: ResponseMeta };
 
-function buildMarketUrl(market: { id: string; slug?: string | null }) {
-  if (market.slug) {
-    const url = new URL(`https://polymarket.com/event/${market.slug}`);
-    url.searchParams.set('marketId', market.id);
-    return url.toString();
+function toMarketUrl(market?: { id: string; slug?: string | null }): string {
+  if (!market) return MARKET_URL_BASE;
+  const slug = market.slug?.trim();
+  if (slug) {
+    return `${MARKET_URL_BASE}/${slug}`;
   }
   return `${MARKET_URL_BASE}/${market.id}`;
 }
 
-function parseNumber(value?: string | null): number {
-  if (!value) return 0;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
-}
-
-export async function fetchTraderStats(address: string): Promise<TraderStats> {
-  if (ENV.useMockData) {
-    return {
-      totalTrades: 1200 + Math.floor(Math.random() * 800),
-      largestWinUSD: 15_000 + Math.random() * 50_000,
-      positionValueUSD: 60_000 + Math.random() * 100_000,
-      realizedPnlUSD: 80_000 + Math.random() * 120_000,
-      winRate: Math.random() * 0.3 + 0.55,
-    };
-  }
-
-  try {
-    const data = await queryWithFallback<TraderStatsQuery>(
-      TRADER_STATS_QUERY,
-      TRADER_STATS_QUERY_FALLBACK,
-      {
-        id: address.toLowerCase(),
-      },
-    );
-
-    if (!data.trader) {
-      return {
-        totalTrades: 0,
-        largestWinUSD: 0,
-        positionValueUSD: 0,
-        realizedPnlUSD: 0,
-        winRate: 0,
-      };
+function normaliseResult(status: string | null | undefined, pnlUSD: number | null, closedAt: number | null):
+  | 'Win'
+  | 'Loss'
+  | 'Pending' {
+  if (status) {
+    const normalised = status.trim().toLowerCase();
+    if (normalised === 'win' || normalised === 'won' || normalised === 'wontrade') {
+      return 'Win';
     }
-
-    const largestWin = parseNumber(data.trader.largestWinUsd);
-    const realized = parseNumber(data.trader.realizedPnlUsd);
-
-    return {
-      totalTrades: parseNumber(data.trader.totalTrades),
-      largestWinUSD: largestWin,
-      positionValueUSD: parseNumber(data.trader.currentPositionUsd),
-      realizedPnlUSD: realized,
-      winRate: 0,
-    };
-  } catch (error) {
-    console.error('Failed to fetch trader stats', { address, error });
-    throw error;
+    if (normalised === 'loss' || normalised === 'lost' || normalised === 'losttrade') {
+      return 'Loss';
+    }
+    if (normalised === 'pending') {
+      return 'Pending';
+    }
   }
+
+  if (closedAt !== null && closedAt !== undefined) {
+    if (pnlUSD !== null && pnlUSD !== undefined) {
+      if (pnlUSD > 0) return 'Win';
+      if (pnlUSD < 0) return 'Loss';
+    }
+    return 'Pending';
+  }
+
+  return 'Pending';
 }
 
-export async function fetchRecentBets(
+function cloneStats(stats: TraderStats): TraderStats {
+  return { ...stats };
+}
+
+export async function fetchWalletData(
   wallet: SmartWallet,
   minBet: number,
-  stats: TraderStats,
-): Promise<RecentBet[]> {
-  if (ENV.useMockData) {
-    const now = Math.floor(Date.now() / 1000);
-    return Array.from({ length: 3 }).map((_, index) => {
-      const question = MOCK_MARKETS[(index + wallet.address.length) % MOCK_MARKETS.length];
-      const sizeUSD = 500 + Math.random() * 50_000;
+): Promise<WalletDataResult> {
+  if (isMockMode()) {
+    return { ok: false, error: 'Mock mode active', meta: { mock: true } };
+  }
+
+  if (!ENV.polySubgraphUrl) {
+    return { ok: false, error: 'POLY_SUBGRAPH_URL missing', meta: { mock: true } };
+  }
+
+  const variables = {
+    id: wallet.address.toLowerCase(),
+    wallet: wallet.address.toLowerCase(),
+    minUsd: String(minBet),
+    recentLimit: RECENT_LIMIT,
+    historyLimit: HISTORY_LIMIT,
+  };
+
+  const result = await fetchJson<TraderOverviewResponse>(ENV.polySubgraphUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query: TRADER_OVERVIEW_QUERY, variables }),
+  });
+
+  if (!result.ok) {
+    console.error('[poly] request failed', { message: result.error });
+    return { ok: false, error: result.error };
+  }
+
+  if (result.data?.errors?.length) {
+    const message = result.data.errors.map((error) => error.message ?? 'Unknown error').join(', ');
+    console.error('[poly] query errors', { message });
+    return { ok: false, error: message };
+  }
+
+  const payload = result.data?.data;
+  if (!payload) {
+    return { ok: false, error: 'Missing subgraph response' };
+  }
+
+  const traderStatsRaw = payload.trader ?? null;
+  const stats: TraderStats = {
+    totalTrades: safeNumber(traderStatsRaw?.totalTrades) ?? 0,
+    largestWinUSD: safeNumber(traderStatsRaw?.largestWinUsd) ?? 0,
+    positionValueUSD: safeNumber(traderStatsRaw?.currentPositionUsd) ?? 0,
+    realizedPnlUSD: safeNumber(traderStatsRaw?.realizedPnlUsd) ?? 0,
+    winRate: 0,
+  };
+
+  const historyRows = (payload.history ?? []).reduce<HistoryRow[]>((acc, fill) => {
+    const sizeUSD = safeNumber(fill.usdValue);
+    if (sizeUSD === null) {
+      return acc;
+    }
+
+    const price = safeNumber(fill.price) ?? 0;
+    const pnlUSD = safeNumber(fill.realizedPnlUsd) ?? 0;
+    const closedAt = safeNumber(fill.closedAt);
+    const resultStatus = normaliseResult(fill.status, pnlUSD, closedAt);
+
+    const market = fill.market ?? { id: 'unknown', question: 'Unknown market' };
+
+    acc.push({
+      marketId: market.id,
+      marketQuestion: market.question,
+      outcome: fill.outcome,
+      sizeUSD,
+      price,
+      result: resultStatus,
+      pnlUSD,
+      marketUrl: toMarketUrl(market),
+      closedAt,
+    });
+
+    return acc;
+  }, []);
+
+  const winRate = computeWinRate(historyRows);
+  stats.winRate = winRate;
+
+  const recentBets: RecentBet[] = (payload.recent ?? [])
+    .map((fill) => {
+      const sizeUSD = safeNumber(fill.usdValue);
+      const price = safeNumber(fill.price) ?? 0;
+      const timestamp = safeNumber(fill.timestamp);
+      if (sizeUSD === null || timestamp === null) {
+        return null;
+      }
+      if (sizeUSD <= minBet) {
+        return null;
+      }
+
+      const market = fill.market ?? { id: 'unknown', question: 'Unknown market' };
+
       return {
         wallet: wallet.address,
         label: wallet.label,
-        outcome: index % 2 === 0 ? 'YES' : 'NO',
+        outcome: fill.outcome,
         sizeUSD,
-        price: 0.4 + Math.random() * 0.5,
-        marketId: `mock-market-${index}`,
-        marketQuestion: question,
-        marketUrl: 'https://polymarket.com/',
-        traderStats: { ...stats },
-        timestamp: now - index * 3600,
+        price,
+        marketId: market.id,
+        marketQuestion: market.question,
+        marketUrl: toMarketUrl(market),
+        traderStats: cloneStats(stats),
+        timestamp,
       } satisfies RecentBet;
-    });
-  }
+    })
+    .filter((bet): bet is RecentBet => Boolean(bet));
 
-  try {
-    const data = await querySubgraph<RecentFillsQuery>(RECENT_FILLS_QUERY, {
-      trader: wallet.address.toLowerCase(),
-      minUsd: minBet,
-      limit: RECENT_BETS_LIMIT,
-    });
-
-    const fills = Array.isArray(data.fills) ? data.fills : [];
-
-    return fills.map((fill) => ({
-      wallet: wallet.address,
-      label: wallet.label,
-      outcome: fill.outcome,
-      sizeUSD: parseNumber(fill.usdValue),
-      price: parseNumber(fill.price),
-      marketId: fill.market.id,
-      marketQuestion: fill.market.question,
-      marketUrl: buildMarketUrl(fill.market),
-      traderStats: { ...stats },
-      timestamp: Number(fill.timestamp),
-    }));
-  } catch (error) {
-    console.error('Failed to fetch recent bets', { wallet: wallet.address, error });
-    throw error;
-  }
+  return {
+    ok: true,
+    data: {
+      stats,
+      recentBets,
+      historyRows,
+    },
+  };
 }
 
-export async function fetchWalletHistory(wallet: SmartWallet): Promise<WalletHistory> {
-  if (ENV.useMockData) {
-    const now = Math.floor(Date.now() / 1000);
-    const rows: TradeHistoryRow[] = Array.from({ length: 8 }).map((_, index) => {
-      const isWin = index % 3 !== 0;
-      const sizeUSD = 500 + Math.random() * 20_000;
-      const pnl = isWin ? Math.random() * sizeUSD * 0.8 : -Math.random() * sizeUSD * 0.6;
+const MOCK_MARKETS = [
+  { id: 'mock-btc-100k', slug: 'will-bitcoin-close-above-100k-in-2024', question: 'Will Bitcoin close above $100k in 2024?' },
+  { id: 'mock-fed-cut', slug: 'will-the-fed-cut-rates-before-september-2024', question: 'Will the Fed cut rates before September 2024?' },
+  { id: 'mock-eth-etf', slug: 'will-eth-etf-be-approved-by-2025', question: 'Will an ETH ETF be approved by 2025?' },
+  { id: 'mock-ai-law', slug: 'will-us-pass-major-ai-regulation-by-2025', question: 'Will the US pass major AI regulation by 2025?' },
+  { id: 'mock-spacex', slug: 'will-spacex-starship-reach-orbit-before-2025', question: 'Will SpaceX Starship reach orbit before 2025?' },
+  { id: 'mock-election', slug: 'will-the-2024-us-election-go-to-a-recount', question: 'Will the 2024 US election go to a recount?' },
+  { id: 'mock-oil', slug: 'will-oil-stay-above-100-by-2025', question: 'Will oil stay above $100 by 2025?' },
+  { id: 'mock-gbtc', slug: 'will-gbtc-outflows-end-in-2024', question: 'Will GBTC outflows end in 2024?' },
+  { id: 'mock-nvidia', slug: 'will-nvidia-hit-2t-market-cap-in-2024', question: 'Will NVIDIA hit a $2T market cap in 2024?' },
+  { id: 'mock-tesla', slug: 'will-tesla-launch-a-robotaxi-fleet-by-2025', question: 'Will Tesla launch a robotaxi fleet by 2025?' },
+];
+
+type MockHistoryRecord = {
+  stats: TraderStats;
+  rows: HistoryRow[];
+};
+
+const MOCK_DATASET = (() => {
+  const wallets = getMockWallets();
+  const histories = new Map<string, MockHistoryRecord>();
+  const recent: RecentBet[] = [];
+  const baseTimestamp = 1_710_000_000;
+
+  wallets.forEach((wallet, index) => {
+    const market = MOCK_MARKETS[index % MOCK_MARKETS.length];
+    const secondaryMarket = MOCK_MARKETS[(index + 1) % MOCK_MARKETS.length];
+
+    const historyRows: HistoryRow[] = Array.from({ length: 5 }).map((_, rowIndex) => {
+      const targetMarket = MOCK_MARKETS[(index + rowIndex) % MOCK_MARKETS.length];
+      const outcome = rowIndex % 2 === 0 ? 'YES' : 'NO';
+      const sizeUSD = 1_200 + index * 80 + rowIndex * 50;
+      const price = 0.35 + (rowIndex % 3) * 0.1;
+      const result: HistoryRow['result'] = rowIndex === 2 ? 'Pending' : rowIndex % 2 === 0 ? 'Win' : 'Loss';
+      const pnlUSD = result === 'Win' ? 1_800 + rowIndex * 120 : result === 'Loss' ? -900 - rowIndex * 80 : 0;
+      const closedAt = result === 'Pending' ? null : baseTimestamp - rowIndex * 8_600 + index * 2_400;
+
       return {
-        marketId: `mock-history-${index}`,
-        marketQuestion: MOCK_MARKETS[(index + 2) % MOCK_MARKETS.length],
-        outcome: index % 2 === 0 ? 'YES' : 'NO',
+        marketId: targetMarket.id,
+        marketQuestion: targetMarket.question,
+        outcome,
         sizeUSD,
-        price: 0.4 + Math.random() * 0.4,
-        result: isWin ? 'Win' : 'Loss',
-        pnlUSD: pnl,
-        marketUrl: 'https://polymarket.com/',
-        closedAt: now - index * 86400,
-      } satisfies TradeHistoryRow;
-    });
-
-    const winRate = computeWinRate(rows);
-
-    return {
-      wallet: wallet.address,
-      label: wallet.label,
-      winRate,
-      rows,
-    };
-  }
-
-  try {
-    const data = await queryWithFallback<TradeHistoryQuery>(
-      TRADE_HISTORY_QUERY,
-      TRADE_HISTORY_QUERY_FALLBACK,
-      {
-        trader: wallet.address.toLowerCase(),
-        limit: HISTORY_LIMIT,
-      },
-    );
-
-    const fills = Array.isArray(data.fills) ? data.fills : [];
-
-    const rows = fills.map((fill) => {
-      const pnl = fill.realizedPnlUsd != null ? parseNumber(fill.realizedPnlUsd) : 0;
-      const status = fill.status;
-      const result =
-        status === 'Win' || status === 'Loss'
-          ? status
-          : pnl > 0
-            ? 'Win'
-            : pnl < 0
-              ? 'Loss'
-              : 'Pending';
-      const closedAt = fill.closedAt ? Number(fill.closedAt) : undefined;
-      return {
-        marketId: fill.market.id,
-        marketQuestion: fill.market.question,
-        outcome: fill.outcome,
-        sizeUSD: parseNumber(fill.usdValue),
-        price: parseNumber(fill.price),
+        price: Number(price.toFixed(2)),
         result,
-        pnlUSD: pnl,
-        marketUrl: buildMarketUrl(fill.market),
+        pnlUSD,
+        marketUrl: `${MARKET_URL_BASE}/${targetMarket.slug}`,
         closedAt,
-      } satisfies TradeHistoryRow;
+      } satisfies HistoryRow;
     });
 
-    const winRate = computeWinRate(rows);
+    const winRate = computeWinRate(historyRows);
 
+    const stats: TraderStats = {
+      totalTrades: 1_450 + index * 45,
+      largestWinUSD: 15_000 + index * 1_200,
+      positionValueUSD: 55_000 + index * 4_200,
+      realizedPnlUSD: 65_000 + index * 3_800,
+      winRate,
+    };
+
+    const primaryBet: RecentBet = {
+      wallet: wallet.address,
+      label: wallet.label,
+      outcome: index % 2 === 0 ? 'YES' : 'NO',
+      sizeUSD: 2_000 + index * 150,
+      price: 0.4 + ((index % 4) * 0.12),
+      marketId: market.id,
+      marketQuestion: market.question,
+      marketUrl: `${MARKET_URL_BASE}/${market.slug}`,
+      traderStats: { ...stats },
+      timestamp: baseTimestamp + index * 3_200,
+    };
+
+    const secondaryBet: RecentBet = {
+      wallet: wallet.address,
+      label: wallet.label,
+      outcome: index % 3 === 0 ? 'NO' : 'YES',
+      sizeUSD: 1_600 + index * 120,
+      price: 0.52 + ((index + 1) % 5) * 0.07,
+      marketId: secondaryMarket.id,
+      marketQuestion: secondaryMarket.question,
+      marketUrl: `${MARKET_URL_BASE}/${secondaryMarket.slug}`,
+      traderStats: { ...stats },
+      timestamp: baseTimestamp + index * 3_200 - 1_600,
+    };
+
+    histories.set(wallet.address.toLowerCase(), { stats, rows: historyRows });
+    recent.push(primaryBet, secondaryBet);
+  });
+
+  return { recent, histories };
+})();
+
+export function getMockRecentBets(minBet: number): RecentBet[] {
+  return MOCK_DATASET.recent.filter((bet) => bet.sizeUSD > minBet);
+}
+
+export function getMockWalletHistory(wallet: SmartWallet): WalletHistory {
+  const record = MOCK_DATASET.histories.get(wallet.address.toLowerCase());
+
+  if (!record) {
     return {
       wallet: wallet.address,
       label: wallet.label,
-      winRate,
-      rows,
+      winRate: 0,
+      rows: [],
     };
-  } catch (error) {
-    console.error('Failed to fetch wallet history', { wallet: wallet.address, error });
-    throw error;
   }
+
+  return {
+    wallet: wallet.address,
+    label: wallet.label,
+    winRate: record.stats.winRate,
+    rows: record.rows,
+  };
 }

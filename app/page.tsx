@@ -2,46 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowUpRight, RefreshCcw, Search } from 'lucide-react';
-
-type TraderStats = {
-  totalTrades: number;
-  largestWinUSD: number;
-  positionValueUSD: number;
-  realizedPnlUSD: number;
-  winRate: number;
-};
-
-type RecentBet = {
-  wallet: string;
-  label: string;
-  outcome: 'YES' | 'NO';
-  sizeUSD: number;
-  price: number;
-  marketId: string;
-  marketQuestion: string;
-  marketUrl: string;
-  traderStats: TraderStats;
-  timestamp: number;
-};
-
-type HistoryRow = {
-  marketId: string;
-  marketQuestion: string;
-  outcome: 'YES' | 'NO';
-  sizeUSD: number;
-  price: number;
-  result: 'Win' | 'Loss' | 'Pending';
-  pnlUSD: number;
-  marketUrl: string;
-  closedAt?: number | null;
-};
-
-type WalletHistory = {
-  wallet: string;
-  label: string;
-  winRate: number;
-  rows: HistoryRow[];
-};
+import type {
+  RecentBet,
+  RecentBetsResponse,
+  ResponseMeta,
+  WalletHistory,
+  WalletHistoryResponse,
+} from '../types';
 
 const REFRESH_INTERVAL = 60 * 60 * 1000;
 const DEFAULT_MIN_BET = 100;
@@ -68,12 +35,14 @@ function formatDate(ts: number) {
 
 export default function HomePage() {
   const [bets, setBets] = useState<RecentBet[]>([]);
+  const [betsMeta, setBetsMeta] = useState<ResponseMeta | undefined>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<WalletHistory | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyMeta, setHistoryMeta] = useState<ResponseMeta | undefined>();
 
   const fetchBets = useCallback(async () => {
     setLoading(true);
@@ -83,10 +52,13 @@ export default function HomePage() {
       if (!response.ok) {
         throw new Error(`Request failed: ${response.status}`);
       }
-      const json = (await response.json()) as RecentBet[];
-      setBets(Array.isArray(json) ? json.slice(0, MAX_WALLETS) : []);
+      const json = (await response.json()) as RecentBetsResponse;
+      const items = Array.isArray(json?.items) ? json.items : [];
+      setBets(items.slice(0, MAX_WALLETS));
+      setBetsMeta(json.meta);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
+      setBetsMeta(undefined);
     } finally {
       setLoading(false);
     }
@@ -95,14 +67,22 @@ export default function HomePage() {
   const loadHistory = useCallback(async (wallet: string, label: string) => {
     setHistoryLoading(true);
     setHistoryError(null);
+    setHistoryMeta(undefined);
     setSelected({ wallet, label, winRate: 0, rows: [] });
     try {
       const response = await fetch(`/api/history/${wallet}`);
       if (!response.ok) {
         throw new Error(`Request failed: ${response.status}`);
       }
-      const json = (await response.json()) as WalletHistory;
-      setSelected(json);
+      const json = (await response.json()) as WalletHistoryResponse;
+      const nextSelected: WalletHistory = {
+        wallet: json.wallet,
+        label: json.label,
+        winRate: json.winRate,
+        rows: Array.isArray(json.rows) ? json.rows : [],
+      };
+      setSelected(nextSelected);
+      setHistoryMeta(json.meta);
     } catch (err) {
       setHistoryError(err instanceof Error ? err.message : 'Failed to load history');
     } finally {
@@ -176,7 +156,9 @@ export default function HomePage() {
           </div>
         ) : filteredBets.length === 0 ? (
           <div className="rounded-xl bg-white p-6 text-center text-sm text-slate-500 shadow-sm">
-            No bets match your filters right now. Try refreshing later.
+            {betsMeta?.mock
+              ? 'Using mock data / missing API keys.'
+              : 'No bets match your filters right now. Try refreshing later.'}
           </div>
         ) : (
           filteredBets.map((bet) => (
@@ -246,6 +228,7 @@ export default function HomePage() {
         <HistoryModal
           onClose={() => setSelected(null)}
           data={selected}
+          meta={historyMeta}
           isLoading={historyLoading}
           error={historyError}
         />
@@ -265,11 +248,13 @@ function StatsItem({ label, value }: { label: string; value: string }) {
 
 function HistoryModal({
   data,
+  meta,
   onClose,
   isLoading,
   error,
 }: {
   data: WalletHistory;
+  meta?: ResponseMeta;
   onClose: () => void;
   isLoading: boolean;
   error: string | null;
@@ -284,6 +269,9 @@ function HistoryModal({
             </p>
             <h3 className="text-xl font-semibold text-slate-900">{data.wallet}</h3>
             <p className="text-sm text-slate-500">Win rate {formatPercent(data.winRate)}</p>
+            {meta?.mock ? (
+              <p className="text-xs text-slate-400">History shown is mock data.</p>
+            ) : null}
           </div>
           <button
             type="button"

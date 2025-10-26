@@ -1,14 +1,15 @@
-import type { RecentBet, TradeHistoryRow, TraderStats } from './types';
+import type { HistoryRow, RecentBet, TraderStats } from '../types';
 
-export const TRADER_THRESHOLDS = {
-  totalTrades: 1000,
-  largestWinUSD: 10_000,
-  positionValueUSD: 40_000,
-  realizedPnlUSD: 50_000,
-};
+export function safeNumber(value: unknown): number | null {
+  const num = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : NaN;
+  if (!Number.isFinite(num)) {
+    return null;
+  }
+  return num;
+}
 
-export function computeWinRate(rows: TradeHistoryRow[]): number {
-  const summary = rows.reduce(
+export function computeWinRate(rows: Array<Pick<HistoryRow, 'result'>>): number {
+  const totals = rows.reduce(
     (acc, row) => {
       if (row.result === 'Win') acc.wins += 1;
       if (row.result === 'Loss') acc.losses += 1;
@@ -17,32 +18,29 @@ export function computeWinRate(rows: TradeHistoryRow[]): number {
     { wins: 0, losses: 0 },
   );
 
-  const total = summary.wins + summary.losses;
-  if (total === 0) return 0;
-  return summary.wins / total;
+  const total = totals.wins + totals.losses;
+  if (total === 0) {
+    return 0;
+  }
+  return totals.wins / total;
 }
 
-export function traderPassesThresholds(stats: TraderStats): boolean {
+export function passesTraderFilters(stats: TraderStats): boolean {
   return (
-    stats.totalTrades > TRADER_THRESHOLDS.totalTrades &&
-    stats.largestWinUSD > TRADER_THRESHOLDS.largestWinUSD &&
-    stats.positionValueUSD > TRADER_THRESHOLDS.positionValueUSD &&
-    stats.realizedPnlUSD > TRADER_THRESHOLDS.realizedPnlUSD
+    stats.totalTrades > 1000 &&
+    stats.largestWinUSD > 10_000 &&
+    stats.positionValueUSD > 40_000 &&
+    stats.realizedPnlUSD > 50_000
   );
 }
 
-export function sanitizeRecentBets(
-  bets: RecentBet[],
-  minBet: number,
-  limit = 50,
-): RecentBet[] {
-  return bets
-    .filter((bet) =>
-      bet.sizeUSD >= minBet &&
-      Number.isFinite(bet.sizeUSD) &&
-      Number.isFinite(bet.price) &&
-      traderPassesThresholds(bet.traderStats),
-    )
-    .sort((a, b) => b.sizeUSD - a.sizeUSD)
-    .slice(0, limit);
+export function sortRecentBets(bets: RecentBet[]): RecentBet[] {
+  return [...bets].sort((a, b) => b.sizeUSD - a.sizeUSD);
+}
+
+export function clampRecentBets(bets: RecentBet[], cap: number): RecentBet[] {
+  if (cap <= 0) {
+    return [];
+  }
+  return sortRecentBets(bets).slice(0, cap);
 }

@@ -16,7 +16,7 @@ NANSEN_API_KEY=your-nansen-api-key
 POLY_SUBGRAPH_URL=https://your-goldsky-polymarket-subgraph
 ```
 
-When these keys are missing the server automatically falls back to rich mock data. You can explicitly opt in to mock mode with `USE_MOCK_DATA=1`.
+When these keys are missing the server automatically falls back to rich mock data. You can explicitly opt in to mock mode with `MOCK=1`.
 
 ## Getting started
 
@@ -33,7 +33,7 @@ To preview the experience without API keys, run:
 npm run dev:mock
 ```
 
-This sets `USE_MOCK_DATA=1` so the API endpoints return seeded mock responses.
+This sets `MOCK=1` so the API endpoints return seeded mock responses without touching live services.
 
 ## Available scripts
 
@@ -61,17 +61,28 @@ Both endpoints cache responses for 60 minutes via HTTP caching headers and ETags
 
 ```
 app/
-  api/          # Next.js API routes
   page.tsx      # Single-page dashboard UI
+pages/api/
+  recent-bets.ts          # REST endpoint for high-value bets
+  history/[wallet].ts     # REST endpoint for per-wallet history
 lib/
   env.ts        # Environment helpers
   nansen.ts     # Smart wallet fetching & mocks
   poly.ts       # Polymarket subgraph helpers & mocks
-  service.ts    # Aggregation and filtering logic
   stats.ts      # Thresholds & calculations
 ```
 
 ## Linting & formatting
 
 The project ships with ESLint (Next.js config) and Prettier 3. Run `npm run lint` before committing changes.
+
+## Deployment
+
+Deploying to Vercel only requires the two environment variables above. Configure them in the Vercel dashboard (Project Settings → Environment Variables) and then run:
+
+```bash
+vercel deploy --prod
+```
+
+Vercel builds will fall back to mock responses automatically if the variables are missing, so production should always return HTTP 200.
 

@@ -1,32 +1,82 @@
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 12_000;
+const DEFAULT_RETRIES = 2;
 
-type FetchOptions = Parameters<typeof fetch>[1] & { timeoutMs?: number };
+export type FetchJsonOptions = (RequestInit & { timeoutMs?: number }) | undefined;
+
+export type FetchJsonSuccess<T> = { ok: true; status: number; data: T };
+export type FetchJsonFailure = { ok: false; status?: number; error: string };
+export type FetchJsonResult<T> = FetchJsonSuccess<T> | FetchJsonFailure;
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export async function fetchJson<T>(
   url: string,
-  options: FetchOptions = {},
-): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  options: FetchJsonOptions = {},
+): Promise<FetchJsonResult<T>> {
+  const retries = DEFAULT_RETRIES;
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!response.ok) {
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      const status = response.status;
       const text = await response.text();
-      throw new Error(`Request to ${url} failed: ${response.status} ${response.statusText} ${text}`);
-    }
+      let parsed: unknown = null;
 
-    return (await response.json()) as T;
-  } catch (error) {
-    if ((error as Error).name === 'AbortError') {
-      throw new Error(`Request to ${url} timed out`);
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+        } catch (error) {
+          parsed = text;
+        }
+      }
+
+      if (response.ok) {
+        return {
+          ok: true,
+          status,
+          data: (parsed ?? {}) as T,
+        };
+      }
+
+      const message = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+
+      if (attempt < retries) {
+        await delay(200 * (attempt + 1));
+        continue;
+      }
+
+      return {
+        ok: false,
+        status,
+        error: message || `Request failed with status ${status}`,
+      };
+    } catch (error) {
+      if (attempt < retries) {
+        await delay(200 * (attempt + 1));
+        continue;
+      }
+
+      const message =
+        error instanceof Error
+          ? error.name === 'AbortError'
+            ? 'Request timed out'
+            : error.message
+          : 'Unknown request error';
+
+      return {
+        ok: false,
+        error: message,
+      };
+    } finally {
+      clearTimeout(timeoutId);
     }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  return { ok: false, error: 'Unknown fetch error' };
 }
