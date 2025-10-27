@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { ArrowUpRight, RefreshCcw, Search } from 'lucide-react';
 import type {
   RecentBet,
@@ -9,12 +10,16 @@ import type {
   WalletHistory,
   WalletHistoryResponse,
 } from '@/types';
+import FilterBar from '@/components/FilterBar';
 
 const REFRESH_INTERVAL = 60 * 60 * 1000;
-const DEFAULT_MIN_BET = 100;
+const DEFAULT_MIN_BET = 500;
 const MAX_WALLETS = 50;
 
-function formatUsd(value: number) {
+function formatUsd(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) {
+    return 'N/A';
+  }
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -22,11 +27,18 @@ function formatUsd(value: number) {
   }).format(value);
 }
 
-function formatPercent(value: number) {
-  if (Number.isNaN(value)) {
-    return '—';
+function formatPercent(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) {
+    return 'N/A';
   }
   return `${value.toFixed(1)}%`;
+}
+
+function formatCount(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) {
+    return 'N/A';
+  }
+  return value.toLocaleString();
 }
 
 function formatDate(ts: number) {
@@ -34,6 +46,20 @@ function formatDate(ts: number) {
 }
 
 export default function HomePage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 text-sm text-slate-500">
+          Loading smart traders…
+        </main>
+      }
+    >
+      <HomePageContent />
+    </Suspense>
+  );
+}
+
+function HomePageContent() {
   const [bets, setBets] = useState<RecentBet[]>([]);
   const [betsMeta, setBetsMeta] = useState<ResponseMeta | undefined>();
   const [loading, setLoading] = useState(false);
@@ -47,45 +73,74 @@ export default function HomePage() {
     { message: string; hint?: string; requestId?: string } | null
   >(null);
   const [historyMeta, setHistoryMeta] = useState<ResponseMeta | undefined>();
+  const searchParams = useSearchParams();
+  const queryKey = searchParams.toString();
+  const latestQueryRef = useRef(queryKey);
 
-  const fetchBets = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams({
-        minBet: String(DEFAULT_MIN_BET),
-        relax: '1',
-      });
-      const response = await fetch(`/api/recent-bets?${params.toString()}`);
-      const requestId = response.headers.get('x-request-id') ?? undefined;
-      if (!response.ok) {
-        const payload = await response
-          .json()
-          .catch(() => ({ message: `Request failed: ${response.status}` }));
-        throw Object.assign(new Error(payload?.message ?? `Request failed: ${response.status}`), {
-          hint: typeof payload?.hint === 'string' ? payload.hint : undefined,
-          requestId,
-        });
+  const fetchBets = useCallback(
+    async (qs: string, options?: { signal?: AbortSignal; silent?: boolean }) => {
+      const { signal, silent } = options ?? {};
+      if (!silent) {
+        setLoading(true);
+        setError(null);
       }
-      const json = (await response.json()) as RecentBetsResponse;
-      const items = Array.isArray(json?.items) ? json.items : [];
-      setBets(items.slice(0, MAX_WALLETS));
-      setBetsMeta(json.meta);
-    } catch (err) {
-      if (err instanceof Error) {
-        setError({
-          message: err.message,
-          hint: (err as { hint?: string }).hint,
-          requestId: (err as { requestId?: string }).requestId,
+
+      try {
+        const params = new URLSearchParams(qs);
+        if (!params.has('minBet')) params.set('minBet', String(DEFAULT_MIN_BET));
+        if (!params.has('hours')) params.set('hours', '24');
+        if (!params.has('outcome') || params.get('outcome') === '') params.set('outcome', 'YES,NO');
+        if (!params.has('sortBy')) params.set('sortBy', 'sizeUSD');
+        if (!params.has('sortDir')) params.set('sortDir', 'desc');
+        if (!params.has('activeWithinDays')) params.set('activeWithinDays', '0');
+        if (!params.has('distinctMarketsMin')) params.set('distinctMarketsMin', '0');
+        if (!params.has('relax')) params.set('relax', '1');
+
+        const response = await fetch(`/api/recent-bets?${params.toString()}`, {
+          signal,
         });
-      } else {
-        setError({ message: 'Failed to load data' });
+        const requestId = response.headers.get('x-request-id') ?? undefined;
+        if (!response.ok) {
+          const payload = await response
+            .json()
+            .catch(() => ({ message: `Request failed: ${response.status}` }));
+          throw Object.assign(new Error(payload?.message ?? `Request failed: ${response.status}`), {
+            hint: typeof payload?.hint === 'string' ? payload.hint : undefined,
+            requestId,
+          });
+        }
+
+        const json = (await response.json()) as RecentBetsResponse;
+        if (signal?.aborted) {
+          return;
+        }
+        const items = Array.isArray(json?.items) ? json.items : [];
+        setBets(items.slice(0, MAX_WALLETS));
+        setBetsMeta(json.meta);
+      } catch (err) {
+        if (signal?.aborted) {
+          return;
+        }
+        if (!silent) {
+          if (err instanceof Error) {
+            setError({
+              message: err.message,
+              hint: (err as { hint?: string }).hint,
+              requestId: (err as { requestId?: string }).requestId,
+            });
+          } else {
+            setError({ message: 'Failed to load data' });
+          }
+          setBetsMeta(undefined);
+        }
+      } finally {
+        if (!silent && !signal?.aborted) {
+          setLoading(false);
+        }
       }
-      setBetsMeta(undefined);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    [],
+  );
 
   const loadHistory = useCallback(async (wallet: string, label: string) => {
     setHistoryLoading(true);
@@ -128,9 +183,30 @@ export default function HomePage() {
     }
   }, []);
 
+  const handleRefresh = useCallback(() => {
+    fetchBets(queryKey).catch(() => undefined);
+  }, [fetchBets, queryKey]);
+
   useEffect(() => {
-    fetchBets();
-    const id = setInterval(fetchBets, REFRESH_INTERVAL);
+    latestQueryRef.current = queryKey;
+  }, [queryKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetchBets(queryKey, { signal: controller.signal }).catch(() => undefined);
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [fetchBets, queryKey]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetchBets(latestQueryRef.current, { silent: true }).catch(() => undefined);
+    }, REFRESH_INTERVAL);
     return () => clearInterval(id);
   }, [fetchBets]);
 
@@ -143,6 +219,10 @@ export default function HomePage() {
       ),
     );
   }, [bets, search]);
+
+  const totalFromServer = Number(betsMeta?.counts?.['totalAfterFilter'] ?? bets.length);
+  const showingCount = filteredBets.length;
+  const limitedModeActive = Boolean(betsMeta?.limitedMode ?? betsMeta?.relax);
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10">
@@ -172,7 +252,7 @@ export default function HomePage() {
           </div>
           <button
             type="button"
-            onClick={fetchBets}
+            onClick={handleRefresh}
             className="inline-flex items-center gap-2 rounded-full bg-polymarket-blue px-4 py-2 text-sm font-semibold text-white transition hover:bg-polymarket-blueDark disabled:opacity-60"
             disabled={loading}
           >
@@ -190,6 +270,20 @@ export default function HomePage() {
           </div>
         ) : null}
       </header>
+
+      <FilterBar totalFromServer={totalFromServer} />
+
+      <div className="flex flex-wrap items-center gap-3 text-sm text-slate-500">
+        <span>
+          Showing <span className="font-semibold text-slate-900">{showingCount}</span> of{' '}
+          <span className="font-semibold text-slate-900">{totalFromServer}</span> wallets.
+        </span>
+        {limitedModeActive ? (
+          <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">
+            Limited mode
+          </span>
+        ) : null}
+      </div>
 
       <section className="grid gap-4">
         {loading && bets.length === 0 ? (
@@ -256,10 +350,26 @@ export default function HomePage() {
                 </div>
               </div>
               <div className="grid gap-4 text-sm text-slate-600 sm:grid-cols-2 lg:grid-cols-4">
-                <StatsItem label="Total Trades" value={bet.traderStats.totalTrades.toLocaleString()} />
-                <StatsItem label="Largest Win" value={formatUsd(bet.traderStats.largestWinUSD)} />
-                <StatsItem label="Position Value" value={formatUsd(bet.traderStats.positionValueUSD)} />
-                <StatsItem label="Realized PnL" value={formatUsd(bet.traderStats.realizedPnlUSD)} />
+                <StatsItem
+                  label="Total Trades"
+                  value={bet.traderStats.totalTrades}
+                  formatter={formatCount}
+                />
+                <StatsItem label="Largest Win" value={bet.traderStats.largestWinUSD} formatter={formatUsd} />
+                <StatsItem
+                  label="Position Value"
+                  value={bet.traderStats.positionValueUSD}
+                  formatter={formatUsd}
+                />
+                <StatsItem label="Realized PnL" value={bet.traderStats.realizedPnlUSD} formatter={formatUsd} />
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+                <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1">
+                  Distinct markets: <span className="ml-1 font-semibold text-slate-700">{formatCount(bet.distinctMarkets)}</span>
+                </span>
+                <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1">
+                  Bets in window: <span className="ml-1 font-semibold text-slate-700">{formatCount(bet.betsCount)}</span>
+                </span>
               </div>
             </article>
           ))
@@ -279,11 +389,19 @@ export default function HomePage() {
   );
 }
 
-function StatsItem({ label, value }: { label: string; value: string }) {
+function StatsItem({
+  label,
+  value,
+  formatter = formatUsd,
+}: {
+  label: string;
+  value: number | null | undefined;
+  formatter?: (value: number | null | undefined) => string;
+}) {
   return (
     <div className="rounded-lg border border-slate-100 bg-white p-3 shadow-sm">
       <p className="text-xs uppercase text-slate-500">{label}</p>
-      <p className="text-base font-semibold text-slate-900">{value}</p>
+      <p className="text-base font-semibold text-slate-900">{formatter(value)}</p>
     </div>
   );
 }

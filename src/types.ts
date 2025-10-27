@@ -1,11 +1,11 @@
 export type Outcome = 'YES' | 'NO';
 
 export interface TraderStats {
-  totalTrades: number;
-  largestWinUSD: number;
-  positionValueUSD: number;
-  realizedPnlUSD: number;
-  winRate: number;
+  totalTrades: number | null;
+  largestWinUSD: number | null;
+  positionValueUSD: number | null;
+  realizedPnlUSD: number | null;
+  winRate: number | null;
 }
 
 export interface ClosedTrade {
@@ -44,6 +44,8 @@ export interface RecentBet {
   marketUrl: string;
   traderStats: TraderStats;
   timestamp: number;
+  distinctMarkets?: number;
+  betsCount?: number;
 }
 
 export interface ResponseMeta {
@@ -51,13 +53,10 @@ export interface ResponseMeta {
   reason?: string;
   fallback?: 'rest';
   mode?: string;
-  counts?: {
-    fetched?: number;
-    timeFiltered?: number;
-    minBet?: number;
-    wallets?: number;
-    items?: number;
-  };
+  limitedMode?: boolean;
+  relax?: boolean;
+  counts?: Record<string, number | undefined>;
+  applied?: Record<string, unknown>;
 }
 
 export interface RecentBetsResponse {

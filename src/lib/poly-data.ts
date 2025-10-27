@@ -21,10 +21,10 @@ export type Position = {
 
 export type TraderStats = {
   totalTrades: number;
-  largestWinUSD: number;
-  positionValueUSD: number;
-  realizedPnlUSD: number;
-  winRate: number;
+  largestWinUSD: number | null;
+  positionValueUSD: number | null;
+  realizedPnlUSD: number | null;
+  winRate: number | null;
 };
 
 export type ProbeNote = {
@@ -199,27 +199,33 @@ export async function computeTraderStats(addr: string, dbg?: { probes: ProbeNote
 
   const wins = closedTrades.filter((trade) => toNum(trade.pnlUSD) > 0);
   const losses = closedTrades.filter((trade) => toNum(trade.pnlUSD) < 0);
-  const largestWinUSD = wins.length ? Math.max(...wins.map((trade) => toNum(trade.pnlUSD))) : 0;
+  const largestWinUSD = wins.length ? Math.max(...wins.map((trade) => toNum(trade.pnlUSD))) : null;
 
   const realizedFromRollup = rollup?.realizedPnlUSD;
+  const realizedFromClosed = closedTrades.length
+    ? closedTrades.reduce((sum, trade) => sum + toNum(trade.pnlUSD), 0)
+    : null;
   const realizedPnlUSD =
     Number.isFinite(realizedFromRollup) && realizedFromRollup !== 0
       ? Number(realizedFromRollup)
-      : closedTrades.reduce((sum, trade) => sum + toNum(trade.pnlUSD), 0);
+      : realizedFromClosed;
 
   const positionFromRollup = rollup?.positionValueUSD;
+  const positionFromPositions = positions.length
+    ? positions.reduce((sum, position) => sum + toNum(position.valueUSD), 0)
+    : null;
   const positionValueUSD =
     Number.isFinite(positionFromRollup) && positionFromRollup !== 0
       ? Number(positionFromRollup)
-      : positions.reduce((sum, position) => sum + toNum(position.valueUSD), 0);
+      : positionFromPositions;
 
   const rollupWinRate = rollup?.winRate;
-  let winRate = 0;
-  if (Number.isFinite(rollupWinRate) && rollupWinRate! > 0) {
-    winRate = rollupWinRate! > 1 ? rollupWinRate! : rollupWinRate! * 100;
+  let winRate: number | null = null;
+  if (Number.isFinite(rollupWinRate) && rollupWinRate !== 0) {
+    winRate = rollupWinRate! > 1 ? Number(rollupWinRate) : Number(rollupWinRate) * 100;
   } else {
     const totalClosed = wins.length + losses.length;
-    winRate = totalClosed ? (wins.length / totalClosed) * 100 : 0;
+    winRate = totalClosed ? (wins.length / totalClosed) * 100 : null;
   }
 
   return {
